@@ -1,0 +1,10 @@
+name: Keep Alive
+on:
+  schedule:
+    - cron: '*/14 * * * *'
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping server
+        run: curl -s --max-time 60 https://quoridor-ws.onrender.com || true
