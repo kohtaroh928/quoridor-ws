@@ -27,12 +27,24 @@ public class GameRoom {
         if (gameOver) return;
         int playerId = (conn == player1) ? 1 : 2;
 
-        if (playerId != currentPlayer) {
-            send(conn, Protocol.error("Not your turn"));
-            return;
-        }
-
         try {
+            @SuppressWarnings("unchecked")
+            java.util.Map<String, Object> data = Protocol.parseJson(message);
+            String type = (String) data.get("type");
+
+            if ("SURRENDER".equals(type)) {
+                int winner = (playerId == 1) ? 2 : 1;
+                broadcast(Protocol.gameEnd(winner));
+                gameOver = true;
+                System.out.println("Player " + playerId + " surrendered.");
+                return;
+            }
+
+            if (playerId != currentPlayer) {
+                send(conn, Protocol.error("Not your turn"));
+                return;
+            }
+
             Protocol.ClientMessage msg = Protocol.parseClientMessage(message);
             switch (msg.type) {
                 case "MOVE":
