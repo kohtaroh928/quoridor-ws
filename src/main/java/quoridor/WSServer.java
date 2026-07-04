@@ -9,7 +9,7 @@ import java.util.*;
 
 public class WSServer extends WebSocketServer {
 
-    private final Map<String, WebSocket> waitingRooms = new HashMap<>();
+    private final Map<String, PendingPlayer> waitingRooms = new HashMap<>();
     private final Map<WebSocket, GameRoom> rooms = new HashMap<>();
     private final Map<WebSocket, String> playerRoomCodes = new HashMap<>();
 
@@ -42,12 +42,20 @@ public class WSServer extends WebSocketServer {
                     return;
                 }
                 code = code.trim().toUpperCase();
+                GameMode mode = parseGameMode((String) data.get("mode"));
+                CharacterType character = parseCharacter((String) data.get("character"), mode);
                 System.out.println("Player joining room: " + code);
 
                 if (waitingRooms.containsKey(code)) {
-                    WebSocket player1 = waitingRooms.remove(code);
+                    PendingPlayer pending = waitingRooms.remove(code);
+                    WebSocket player1 = pending.socket;
                     if (player1.isOpen()) {
-                        GameRoom gameRoom = new GameRoom(player1, conn);
+                        if (pending.mode != mode) {
+                            conn.send(Protocol.error("Room mode does not match"));
+                            waitingRooms.put(code, pending);
+                            return;
+                        }
+                        GameRoom gameRoom = new GameRoom(player1, conn, mode, pending.character, character);
                         rooms.put(player1, gameRoom);
                         rooms.put(conn, gameRoom);
                         playerRoomCodes.put(player1, code);
@@ -55,11 +63,11 @@ public class WSServer extends WebSocketServer {
                         gameRoom.startGame();
                         System.out.println("Room " + code + ": game started!");
                     } else {
-                        waitingRooms.put(code, conn);
+                        waitingRooms.put(code, new PendingPlayer(conn, mode, character));
                         System.out.println("Previous player disconnected, waiting again for room: " + code);
                     }
                 } else {
-                    waitingRooms.put(code, conn);
+                    waitingRooms.put(code, new PendingPlayer(conn, mode, character));
                     conn.send("{\"type\":\"WAITING\",\"room\":\"" + code + "\"}");
                     System.out.println("Waiting for opponent in room: " + code);
                 }
@@ -74,7 +82,7 @@ public class WSServer extends WebSocketServer {
         System.out.println("Disconnected: " + conn.getRemoteSocketAddress());
 
         String roomCode = playerRoomCodes.remove(conn);
-        waitingRooms.values().remove(conn);
+        waitingRooms.values().removeIf(p -> p.socket == conn);
 
         GameRoom room = rooms.remove(conn);
         if (room != null) {
@@ -101,5 +109,34 @@ public class WSServer extends WebSocketServer {
         String envPort = System.getenv("PORT");
         int port = envPort != null ? Integer.parseInt(envPort) : 10000;
         new WSServer(port).start();
+    }
+
+    private GameMode parseGameMode(String raw) {
+        if (raw == null || raw.trim().isEmpty()) return GameMode.NORMAL;
+        return GameMode.valueOf(raw.trim().toUpperCase());
+    }
+
+    private CharacterType parseCharacter(String raw, GameMode mode) {
+        if (mode == GameMode.NORMAL) return CharacterType.NONE;
+        if (raw == null || raw.trim().isEmpty()) {
+            throw new IllegalArgumentException("Character is required");
+        }
+        CharacterType character = CharacterType.valueOf(raw.trim().toUpperCase());
+        if (character == CharacterType.NONE) {
+            throw new IllegalArgumentException("Character is required");
+        }
+        return character;
+    }
+
+    private static class PendingPlayer {
+        final WebSocket socket;
+        final GameMode mode;
+        final CharacterType character;
+
+        PendingPlayer(WebSocket socket, GameMode mode, CharacterType character) {
+            this.socket = socket;
+            this.mode = mode;
+            this.character = character;
+        }
     }
 }
