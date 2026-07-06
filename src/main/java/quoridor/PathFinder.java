@@ -9,7 +9,8 @@ public class PathFinder {
 
     public static boolean hasPath(Board board, int playerId) {
         Player player = board.getPlayer(playerId);
-        int goalRow = player.getGoalRow();
+
+        if (GameLogic.isGoal(playerId, player.getX(), player.getY())) return true;
 
         boolean[][] visited = new boolean[Board.SIZE][Board.SIZE];
         Queue<int[]> queue = new LinkedList<>();
@@ -19,7 +20,6 @@ public class PathFinder {
 
         while (!queue.isEmpty()) {
             int[] pos = queue.poll();
-            if (pos[1] == goalRow) return true;
 
             for (int[] d : DIRS) {
                 int nx = pos[0] + d[0];
@@ -27,6 +27,7 @@ public class PathFinder {
 
                 if (board.isInBounds(nx, ny) && !visited[nx][ny]
                         && !board.isBlocked(pos[0], pos[1], nx, ny)) {
+                    if (GameLogic.isGoal(playerId, nx, ny)) return true;
                     visited[nx][ny] = true;
                     queue.add(new int[]{nx, ny});
                 }

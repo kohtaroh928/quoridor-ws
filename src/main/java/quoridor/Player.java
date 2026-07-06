@@ -3,6 +3,7 @@ package quoridor;
 public class Player {
 
     private final int id;
+    private final int initialWalls;
     private int x;
     private int y;
     private int wallsRemaining;
@@ -13,10 +14,15 @@ public class Player {
     private boolean cannotMoveNextTurn = false;
 
     public Player(int id, int x, int y) {
+        this(id, x, y, 10);
+    }
+
+    public Player(int id, int x, int y, int initialWalls) {
         this.id = id;
         this.x = x;
         this.y = y;
-        this.wallsRemaining = 10;
+        this.initialWalls = initialWalls;
+        this.wallsRemaining = initialWalls;
     }
 
     public int getId() { return id; }
@@ -62,46 +68,42 @@ public class Player {
                 this.skillRemaining = 1;
                 this.miniWallsRemaining = 0;
                 this.trapRemaining = 0;
-                this.wallsRemaining = 10;
+                this.wallsRemaining = initialWalls;
                 break;
             case ACROBAT:
                 this.skillRemaining = 3;
                 this.miniWallsRemaining = 0;
                 this.trapRemaining = 0;
-                this.wallsRemaining = 10;
+                this.wallsRemaining = initialWalls;
                 break;
             case RUNNER:
                 this.skillRemaining = 2;
                 this.miniWallsRemaining = 0;
                 this.trapRemaining = 0;
-                this.wallsRemaining = 10;
+                this.wallsRemaining = initialWalls;
                 break;
             case BUILDER:
                 this.skillRemaining = 2;
                 this.miniWallsRemaining = 4;
                 this.trapRemaining = 0;
-                this.wallsRemaining = 8;
+                this.wallsRemaining = Math.max(0, initialWalls - 2);
                 break;
             case TRAPPER:
                 this.skillRemaining = 0;
                 this.miniWallsRemaining = 0;
                 this.trapRemaining = 1;
-                this.wallsRemaining = 10;
+                this.wallsRemaining = initialWalls;
                 break;
             case NONE:
             default:
                 this.skillRemaining = 0;
                 this.miniWallsRemaining = 0;
                 this.trapRemaining = 0;
-                this.wallsRemaining = 10;
+                this.wallsRemaining = initialWalls;
                 break;
         }
 
         this.cannotMoveNextTurn = false;
-    }
-
-    public int getGoalRow() {
-        return id == 1 ? 8 : 0;
     }
 
     public void reset(int startX, int startY) {

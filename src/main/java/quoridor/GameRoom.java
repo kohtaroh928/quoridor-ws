@@ -2,43 +2,105 @@ package quoridor;
 
 import org.java_websocket.WebSocket;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 public class GameRoom {
 
-    private final WebSocket player1;
-    private final WebSocket player2;
+    // 全ルーム共有のタイマー/AI実行スレッド
+    private static final ScheduledExecutorService SCHEDULER =
+            Executors.newScheduledThreadPool(2, r -> {
+                Thread t = new Thread(r, "game-room-scheduler");
+                t.setDaemon(true);
+                return t;
+            });
+
+    private static final CharacterType[] AI_CHARACTERS = {
+            CharacterType.BREAKER, CharacterType.ACROBAT, CharacterType.RUNNER,
+            CharacterType.BUILDER, CharacterType.TRAPPER
+    };
+
+    // 座席: 人間(WebSocket)かAI(難易度付き)のどちらか
+    public static class Seat {
+        WebSocket conn;
+        boolean ai;
+        int aiDifficulty;
+        CharacterType character = CharacterType.NONE;
+
+        public static Seat human(WebSocket conn, CharacterType character) {
+            Seat s = new Seat();
+            s.conn = conn;
+            s.character = character == null ? CharacterType.NONE : character;
+            return s;
+        }
+
+        public static Seat aiSeat(int difficulty) {
+            Seat s = new Seat();
+            s.ai = true;
+            s.aiDifficulty = Math.max(1, Math.min(3, difficulty));
+            return s;
+        }
+    }
+
+    private final Seat[] seats;
     private final Board board;
-    private final GameMode gameMode;
+    private final boolean characterMode;
+    private final boolean obstacleMode;
+    private final int timeLimit; // 1ターンの秒数(0=無制限)
     private int currentPlayer = 1;
     private boolean gameOver = false;
-    private final boolean[] rematchRequested = new boolean[2];
+    private boolean dissolved = false;
+    private final boolean[] rematchRequested;
 
-    public GameRoom(WebSocket p1, WebSocket p2) {
-        this(p1, p2, GameMode.NORMAL, CharacterType.NONE, CharacterType.NONE);
+    // ターンごとに増える通し番号。古いタイマー/AIタスクの誤発火を防ぐ
+    private int turnSerial = 0;
+    private int scheduledSerial = -1;
+    private ScheduledFuture<?> pendingTask;
+
+    public GameRoom(List<Seat> seatList, boolean characterMode, boolean obstacleMode, int timeLimit) {
+        this.seats = seatList.toArray(new Seat[0]);
+        this.board = new Board(this.seats.length);
+        this.characterMode = characterMode;
+        this.obstacleMode = obstacleMode;
+        this.timeLimit = timeLimit;
+        this.rematchRequested = new boolean[this.seats.length];
+
+        if (this.characterMode) {
+            Random random = new Random();
+            for (int i = 0; i < this.seats.length; i++) {
+                Seat seat = this.seats[i];
+                if (seat.ai || seat.character == CharacterType.NONE) {
+                    seat.character = AI_CHARACTERS[random.nextInt(AI_CHARACTERS.length)];
+                }
+                board.getPlayer(i + 1).setCharacter(seat.character);
+            }
+        }
+
+        if (this.obstacleMode) {
+            GameLogic.placeObstacleWalls(board, new Random());
+        }
     }
 
-    public GameRoom(WebSocket p1, WebSocket p2, GameMode mode, CharacterType c1, CharacterType c2) {
-        this.player1 = p1;
-        this.player2 = p2;
-        this.board = new Board();
-        this.gameMode = mode == null ? GameMode.NORMAL : mode;
-        board.getPlayer(1).setCharacter(this.gameMode == GameMode.CHARACTER ? c1 : CharacterType.NONE);
-        board.getPlayer(2).setCharacter(this.gameMode == GameMode.CHARACTER ? c2 : CharacterType.NONE);
-    }
-
-    public void startGame() {
-        send(player1, Protocol.gameStart(1));
-        send(player2, Protocol.gameStart(2));
+    public synchronized void startGame() {
+        for (int i = 0; i < seats.length; i++) {
+            send(seats[i].conn, Protocol.gameStart(i + 1));
+        }
         sendBoardUpdate();
-        System.out.println("Game started!");
+        scheduleTurn();
+        System.out.println("Game started! (" + seats.length + " players, "
+                + humanCount() + " humans, timeLimit=" + timeLimit + ")");
     }
 
     public synchronized void onMessage(WebSocket conn, String message) {
-        int playerId = (conn == player1) ? 1 : 2;
+        int playerId = seatOf(conn);
+        if (playerId <= 0) return;
 
         try {
-            @SuppressWarnings("unchecked")
             java.util.Map<String, Object> data = Protocol.parseJson(message);
             String type = (String) data.get("type");
 
@@ -50,9 +112,14 @@ public class GameRoom {
             if (gameOver) return;
 
             if ("SURRENDER".equals(type)) {
-                int winner = (playerId == 1) ? 2 : 1;
-                broadcast(Protocol.gameEnd(winner));
-                gameOver = true;
+                if (seats.length == 2) {
+                    int winner = (playerId == 1) ? 2 : 1;
+                    broadcast(Protocol.gameEnd(winner));
+                } else {
+                    broadcastExcept(conn, Protocol.error("プレイヤーが降参したため対戦を終了します"));
+                    broadcast(Protocol.gameEnd(0));
+                }
+                endGame();
                 System.out.println("Player " + playerId + " surrendered.");
                 return;
             }
@@ -79,6 +146,7 @@ public class GameRoom {
                 default:
                     send(conn, Protocol.error("Unknown action"));
             }
+            scheduleTurn();
         } catch (Exception e) {
             send(conn, Protocol.error("Invalid message: " + e.getMessage()));
         }
@@ -110,7 +178,7 @@ public class GameRoom {
     }
 
     private void handleUseSkill(int playerId, Protocol.ClientMessage msg) {
-        if (gameMode != GameMode.CHARACTER) {
+        if (!characterMode) {
             send(getSocket(playerId), Protocol.error("Skills are not available in normal mode"));
             return;
         }
@@ -198,7 +266,7 @@ public class GameRoom {
     }
 
     private void handlePlaceTrap(int playerId, int x, int y) {
-        if (gameMode != GameMode.CHARACTER) {
+        if (!characterMode) {
             send(getSocket(playerId), Protocol.error("Traps are not available in normal mode"));
             return;
         }
@@ -230,7 +298,7 @@ public class GameRoom {
         if (GameLogic.checkWin(board, playerId)) {
             sendBoardUpdate();
             broadcast(Protocol.gameEnd(playerId));
-            gameOver = true;
+            endGame();
             System.out.println("Player " + playerId + " wins!");
             return;
         }
@@ -238,63 +306,267 @@ public class GameRoom {
         sendBoardUpdate();
     }
 
-    public void onPlayerDisconnected(WebSocket conn) {
-        WebSocket other = getOtherPlayer(conn);
-        if (!gameOver) {
-            gameOver = true;
-            if (other != null && other.isOpen()) {
-                send(other, Protocol.error("Opponent disconnected"));
-                int winner = (conn == player1) ? 2 : 1;
-                send(other, Protocol.gameEnd(winner));
-            }
+    // --- turn timer / AI ---
+
+    // 現在の手番に応じて、AIの一手かターンタイムアウトを予約する。
+    // 同じターンに対しては一度しか予約しない(トラップ設置は手番が続くため再予約されない)
+    private void scheduleTurn() {
+        if (gameOver || dissolved) {
+            cancelPendingTask();
             return;
         }
-        // ゲーム終了後(再戦待ち中を含む)に相手が退出した場合、待機側に通知する
-        if (other != null && other.isOpen()) {
-            send(other, Protocol.roomClosed());
+        if (scheduledSerial == turnSerial) return;
+        scheduledSerial = turnSerial;
+        cancelPendingTask();
+
+        final int serial = turnSerial;
+        Seat seat = seats[currentPlayer - 1];
+        if (seat.ai) {
+            pendingTask = SCHEDULER.schedule(() -> runAiTurn(serial), 600, TimeUnit.MILLISECONDS);
+        } else if (timeLimit > 0) {
+            pendingTask = SCHEDULER.schedule(() -> onTurnTimeout(serial), timeLimit, TimeUnit.SECONDS);
         }
     }
 
+    private void runAiTurn(int serial) {
+        synchronized (this) {
+            if (gameOver || dissolved || serial != turnSerial) return;
+            int p = currentPlayer;
+            if (!seats[p - 1].ai) return;
+
+            // トラップ設置は手番が続くため、最大数回まで続けて指す
+            for (int guard = 0; guard < 3 && !gameOver && currentPlayer == p && turnSerial == serial; guard++) {
+                AIEngine.State state = AIEngine.fromBoard(board, characterMode);
+                AIEngine.Move move = AIEngine.getBestMove(state, p, seats[p - 1].aiDifficulty);
+                if (!applyAiMove(p, move)) {
+                    // 想定外の不正手(あるいは合法手なし)はスキップして進行を止めない
+                    board.getPlayer(p).setCannotMoveNextTurn(false);
+                    nextTurn();
+                    sendBoardUpdate();
+                    break;
+                }
+            }
+            scheduleTurn();
+        }
+    }
+
+    private boolean applyAiMove(int p, AIEngine.Move m) {
+        switch (m.kind) {
+            case AIEngine.Move.CELL:
+                if (!GameLogic.isValidMove(board, p, m.x, m.y)) return false;
+                handleMove(p, m.x, m.y);
+                return true;
+            case AIEngine.Move.WALL: {
+                Wall wall = new Wall(m.x, m.y, m.horizontal ? Wall.Direction.HORIZONTAL : Wall.Direction.VERTICAL);
+                if (!GameLogic.isValidWallPlacement(board, p, wall)) return false;
+                handlePlaceWall(p, m.x, m.y, wall.getDirection());
+                return true;
+            }
+            case AIEngine.Move.SKILL_MOVE:
+                if ("RUNNER_MOVE".equals(m.skill)) {
+                    if (!GameLogic.isValidRunnerMove(board, p, m.x, m.y)) return false;
+                    handleRunnerMove(p, m.x, m.y);
+                } else {
+                    if (!GameLogic.isValidAcrobatMove(board, p, m.x, m.y)) return false;
+                    handleAcrobatMove(p, m.x, m.y);
+                }
+                return true;
+            case AIEngine.Move.BREAK_WALL: {
+                Wall target = new Wall(m.x, m.y, m.horizontal ? Wall.Direction.HORIZONTAL : Wall.Direction.VERTICAL);
+                if (!GameLogic.canBreakWall(board, p, target)) return false;
+                handleBreakWall(p, m.x, m.y, target.getDirection());
+                return true;
+            }
+            case AIEngine.Move.MINI_WALLS: {
+                List<MiniWall> walls = new ArrayList<>();
+                for (int[] w : m.miniWalls) {
+                    walls.add(new MiniWall(w[0], w[1],
+                            w[2] == 1 ? MiniWall.Direction.HORIZONTAL : MiniWall.Direction.VERTICAL));
+                }
+                if (!GameLogic.isValidMiniWallPlacements(board, p, walls)) return false;
+                handlePlaceMiniWalls(p, walls);
+                return true;
+            }
+            case AIEngine.Move.TRAP:
+                if (!GameLogic.isValidTrapPlacement(board, p, m.x, m.y)) return false;
+                handlePlaceTrap(p, m.x, m.y);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void onTurnTimeout(int serial) {
+        synchronized (this) {
+            if (gameOver || dissolved || serial != turnSerial) return;
+            int p = currentPlayer;
+            // 時間切れはターンスキップ。トラップの移動禁止も1ターン消費したとみなして解除する
+            board.getPlayer(p).setCannotMoveNextTurn(false);
+            broadcast(Protocol.notice("P" + p + " は時間切れのためターンをスキップしました"));
+            System.out.println("Player " + p + " timed out. Turn skipped.");
+            nextTurn();
+            sendBoardUpdate();
+            scheduleTurn();
+        }
+    }
+
+    private void endGame() {
+        gameOver = true;
+        cancelPendingTask();
+    }
+
+    private void cancelPendingTask() {
+        if (pendingTask != null) {
+            pendingTask.cancel(false);
+            pendingTask = null;
+        }
+    }
+
+    // --- disconnect ---
+
+    public synchronized void onPlayerDisconnected(WebSocket conn) {
+        int playerId = seatOf(conn);
+        if (playerId <= 0) return;
+        Seat seat = seats[playerId - 1];
+        seat.conn = null;
+
+        if (!gameOver) {
+            if (seats.length == 2) {
+                // 2人戦: 従来通り残った側の勝ち
+                endGame();
+                dissolved = true;
+                Seat other = seats[playerId == 1 ? 1 : 0];
+                if (other.conn != null && other.conn.isOpen()) {
+                    send(other.conn, Protocol.error("Opponent disconnected"));
+                    send(other.conn, Protocol.gameEnd(playerId == 1 ? 2 : 1));
+                }
+                return;
+            }
+
+            // 4人戦: 切断したプレイヤーはAI(難易度:強)と交代して対局を続ける
+            if (humanCount() == 0) {
+                endGame();
+                dissolved = true;
+                return;
+            }
+            seat.ai = true;
+            seat.aiDifficulty = 3;
+            broadcast(Protocol.notice("P" + playerId + " の通信が切れたため、AI(強)が引き継ぎます"));
+            System.out.println("Player " + playerId + " disconnected. AI takes over.");
+            sendBoardUpdate();
+            scheduledSerial = -1; // 切断した席の手番なら即AIを起動する
+            scheduleTurn();
+            return;
+        }
+
+        // ゲーム終了後(再戦待ち中を含む)に相手が退出した場合、待機側に通知して解散する
+        dissolved = true;
+        cancelPendingTask();
+        for (Seat s : seats) {
+            if (s.conn != null && s.conn.isOpen()) send(s.conn, Protocol.roomClosed());
+        }
+    }
+
+    // --- rematch ---
+
     private void handleRematch(int playerId) {
-        if (!gameOver) return;
+        if (!gameOver || dissolved) return;
         rematchRequested[playerId - 1] = true;
-        if (rematchRequested[0] && rematchRequested[1]) {
+
+        boolean allRequested = true;
+        for (int i = 0; i < seats.length; i++) {
+            if (seats[i].ai) continue; // AI席は自動で合意
+            if (seats[i].conn == null || !rematchRequested[i]) { allRequested = false; break; }
+        }
+
+        if (allRequested) {
             startRematch();
         } else {
-            send(getSocket(playerId == 1 ? 2 : 1), Protocol.rematchRequested());
+            for (Seat s : seats) {
+                if (!s.ai && s.conn != null && s.conn != getSocket(playerId)) {
+                    send(s.conn, Protocol.rematchRequested());
+                }
+            }
         }
     }
 
     private void startRematch() {
         board.reset();
+        if (obstacleMode) {
+            GameLogic.placeObstacleWalls(board, new Random());
+        }
         currentPlayer = 1;
+        turnSerial++;
         gameOver = false;
-        rematchRequested[0] = false;
-        rematchRequested[1] = false;
-        send(player1, Protocol.gameStart(1));
-        send(player2, Protocol.gameStart(2));
+        for (int i = 0; i < rematchRequested.length; i++) rematchRequested[i] = false;
+        for (int i = 0; i < seats.length; i++) {
+            send(seats[i].conn, Protocol.gameStart(i + 1));
+        }
         sendBoardUpdate();
+        scheduleTurn();
         System.out.println("Rematch started!");
     }
 
-    public WebSocket getOtherPlayer(WebSocket conn) {
-        return (conn == player1) ? player2 : player1;
-    }
+    // --- helpers ---
+
+    public synchronized boolean isDissolved() { return dissolved; }
 
     public boolean isGameOver() { return gameOver; }
 
+    public synchronized List<WebSocket> getHumanSockets() {
+        List<WebSocket> result = new ArrayList<>();
+        for (Seat s : seats) {
+            if (!s.ai && s.conn != null) result.add(s.conn);
+        }
+        return result;
+    }
+
+    public List<WebSocket> getOtherPlayers(WebSocket conn) {
+        List<WebSocket> others = new ArrayList<>();
+        for (Seat s : seats) {
+            if (s.conn != null && s.conn != conn) others.add(s.conn);
+        }
+        return others;
+    }
+
+    private int humanCount() {
+        int n = 0;
+        for (Seat s : seats) {
+            if (!s.ai && s.conn != null) n++;
+        }
+        return n;
+    }
+
+    private int seatOf(WebSocket conn) {
+        if (conn == null) return -1;
+        for (int i = 0; i < seats.length; i++) {
+            if (seats[i].conn == conn) return i + 1;
+        }
+        return -1;
+    }
+
     private void nextTurn() {
-        currentPlayer = (currentPlayer == 1) ? 2 : 1;
+        currentPlayer = currentPlayer % board.getPlayerCount() + 1;
+        turnSerial++;
     }
 
     private void broadcast(String json) {
-        send(player1, json);
-        send(player2, json);
+        for (Seat s : seats) send(s.conn, json);
+    }
+
+    private void broadcastExcept(WebSocket exclude, String json) {
+        for (Seat s : seats) {
+            if (s.conn != exclude) send(s.conn, json);
+        }
     }
 
     private void sendBoardUpdate() {
-        send(player1, Protocol.boardUpdate(board, currentPlayer, gameMode, 1));
-        send(player2, Protocol.boardUpdate(board, currentPlayer, gameMode, 2));
+        boolean[] aiFlags = new boolean[seats.length];
+        for (int i = 0; i < seats.length; i++) aiFlags[i] = seats[i].ai;
+        for (int i = 0; i < seats.length; i++) {
+            send(seats[i].conn, Protocol.boardUpdate(board, currentPlayer, characterMode, obstacleMode,
+                    i + 1, timeLimit, aiFlags));
+        }
     }
 
     private void send(WebSocket conn, String json) {
@@ -302,6 +574,6 @@ public class GameRoom {
     }
 
     private WebSocket getSocket(int playerId) {
-        return playerId == 1 ? player1 : player2;
+        return seats[playerId - 1].conn;
     }
 }

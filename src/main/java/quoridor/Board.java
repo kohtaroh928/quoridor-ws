@@ -8,26 +8,43 @@ public class Board {
     public static final int SIZE = 9;
     public static final int WALL_MAX = 8;
 
-    private final Player player1;
-    private final Player player2;
+    private final Player[] players;
     private final List<Wall> walls;
     private final List<MiniWall> miniWalls;
     private final List<Trap> traps;
 
     public Board() {
-        player1 = new Player(1, 4, 0);
-        player2 = new Player(2, 4, 8);
+        this(2);
+    }
+
+    public Board(int playerCount) {
+        this.players = createPlayers(playerCount);
         walls = new ArrayList<>();
         miniWalls = new ArrayList<>();
         traps = new ArrayList<>();
     }
 
-    public Player getPlayer(int id) {
-        return id == 1 ? player1 : player2;
+    private static Player[] createPlayers(int playerCount) {
+        if (playerCount == 4) {
+            return new Player[]{
+                new Player(1, 4, 0, 5),
+                new Player(2, 4, 8, 5),
+                new Player(3, 0, 4, 5),
+                new Player(4, 8, 4, 5),
+            };
+        }
+        return new Player[]{
+            new Player(1, 4, 0, 10),
+            new Player(2, 4, 8, 10),
+        };
     }
 
-    public Player getOpponent(int playerId) {
-        return playerId == 1 ? player2 : player1;
+    public int getPlayerCount() {
+        return players.length;
+    }
+
+    public Player getPlayer(int id) {
+        return players[id - 1];
     }
 
     public List<Wall> getWalls() {
@@ -76,6 +93,14 @@ public class Board {
             }
         }
         return null;
+    }
+
+    // 指定座標にいるプレイヤーのidを返す(いなければ0)
+    public int getPlayerAt(int x, int y) {
+        for (Player p : players) {
+            if (p.getX() == x && p.getY() == y) return p.getId();
+        }
+        return 0;
     }
 
     public boolean isBlocked(int x1, int y1, int x2, int y2) {
@@ -143,8 +168,10 @@ public class Board {
     }
 
     public void reset() {
-        player1.reset(4, 0);
-        player2.reset(4, 8);
+        Player[] fresh = createPlayers(players.length);
+        for (int i = 0; i < players.length; i++) {
+            players[i].reset(fresh[i].getX(), fresh[i].getY());
+        }
         walls.clear();
         miniWalls.clear();
         traps.clear();

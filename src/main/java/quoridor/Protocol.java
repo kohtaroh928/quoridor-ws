@@ -14,13 +14,15 @@ public class Protocol {
     }
 
     public static String boardUpdate(Board board, int currentPlayer) {
-        return boardUpdate(board, currentPlayer, GameMode.NORMAL, 0);
+        return boardUpdate(board, currentPlayer, false, false, 0, 0, null);
     }
 
-    public static String boardUpdate(Board board, int currentPlayer, GameMode gameMode, int receiverPlayerId) {
+    public static String boardUpdate(Board board, int currentPlayer, boolean characterMode, boolean obstacleMode,
+                                     int receiverPlayerId, int timeLimit, boolean[] aiSeats) {
+        int n = board.getPlayerCount();
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"BOARD_UPDATE\",\"players\":[");
-        for (int i = 1; i <= 2; i++) {
+        for (int i = 1; i <= n; i++) {
             Player p = board.getPlayer(i);
             if (i > 1) sb.append(',');
             sb.append("{\"id\":").append(p.getId())
@@ -54,37 +56,51 @@ public class Protocol {
               .append(",\"y\":").append(trap.getY()).append('}');
         }
         sb.append("],\"currentPlayer\":").append(currentPlayer);
-        sb.append(",\"wallsRemaining\":{\"1\":")
-          .append(board.getPlayer(1).getWallsRemaining())
-          .append(",\"2\":")
-          .append(board.getPlayer(2).getWallsRemaining())
-          .append("}");
-        sb.append(",\"mode\":\"").append(gameMode.name()).append("\"");
-        sb.append(",\"characters\":[\"")
-          .append(board.getPlayer(1).getCharacterType().name())
-          .append("\",\"")
-          .append(board.getPlayer(2).getCharacterType().name())
-          .append("\"]");
-        sb.append(",\"skillRemaining\":[")
-          .append(board.getPlayer(1).getSkillRemaining())
-          .append(',')
-          .append(board.getPlayer(2).getSkillRemaining())
-          .append(']');
-        sb.append(",\"miniWallsRemaining\":[")
-          .append(board.getPlayer(1).getMiniWallsRemaining())
-          .append(',')
-          .append(board.getPlayer(2).getMiniWallsRemaining())
-          .append(']');
-        sb.append(",\"trapRemaining\":[")
-          .append(board.getPlayer(1).getTrapRemaining())
-          .append(',')
-          .append(board.getPlayer(2).getTrapRemaining())
-          .append(']');
-        sb.append(",\"cannotMove\":[")
-          .append(board.getPlayer(1).cannotMoveNextTurn())
-          .append(',')
-          .append(board.getPlayer(2).cannotMoveNextTurn())
-          .append("]}");
+        sb.append(",\"wallsRemaining\":[");
+        for (int i = 1; i <= n; i++) {
+            if (i > 1) sb.append(',');
+            sb.append(board.getPlayer(i).getWallsRemaining());
+        }
+        sb.append(']');
+        sb.append(",\"characterMode\":").append(characterMode);
+        sb.append(",\"obstacleMode\":").append(obstacleMode);
+        sb.append(",\"characters\":[");
+        for (int i = 1; i <= n; i++) {
+            if (i > 1) sb.append(',');
+            sb.append('"').append(board.getPlayer(i).getCharacterType().name()).append('"');
+        }
+        sb.append(']');
+        sb.append(",\"skillRemaining\":[");
+        for (int i = 1; i <= n; i++) {
+            if (i > 1) sb.append(',');
+            sb.append(board.getPlayer(i).getSkillRemaining());
+        }
+        sb.append(']');
+        sb.append(",\"miniWallsRemaining\":[");
+        for (int i = 1; i <= n; i++) {
+            if (i > 1) sb.append(',');
+            sb.append(board.getPlayer(i).getMiniWallsRemaining());
+        }
+        sb.append(']');
+        sb.append(",\"trapRemaining\":[");
+        for (int i = 1; i <= n; i++) {
+            if (i > 1) sb.append(',');
+            sb.append(board.getPlayer(i).getTrapRemaining());
+        }
+        sb.append(']');
+        sb.append(",\"cannotMove\":[");
+        for (int i = 1; i <= n; i++) {
+            if (i > 1) sb.append(',');
+            sb.append(board.getPlayer(i).cannotMoveNextTurn());
+        }
+        sb.append(']');
+        sb.append(",\"timeLimit\":").append(timeLimit);
+        sb.append(",\"ai\":[");
+        for (int i = 0; i < n; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(aiSeats != null && i < aiSeats.length && aiSeats[i]);
+        }
+        sb.append("]}");
         return sb.toString();
     }
 
@@ -102,6 +118,37 @@ public class Protocol {
 
     public static String roomClosed() {
         return "{\"type\":\"ROOM_CLOSED\"}";
+    }
+
+    public static String waiting(String room, int joined, int needed) {
+        return "{\"type\":\"WAITING\",\"room\":\"" + escapeJson(room)
+            + "\",\"joined\":" + joined + ",\"needed\":" + needed + "}";
+    }
+
+    // ルーム参加成功時に、参加者へルーム設定を伝える
+    public static String joined(boolean characterMode, boolean obstacleMode, int players, int timeLimit) {
+        return "{\"type\":\"JOINED\",\"characterMode\":" + characterMode
+            + ",\"obstacleMode\":" + obstacleMode
+            + ",\"players\":" + players
+            + ",\"timeLimit\":" + timeLimit + "}";
+    }
+
+    public static String roomFull() {
+        return "{\"type\":\"ROOM_FULL\"}";
+    }
+
+    public static String roomNotFound() {
+        return "{\"type\":\"ROOM_NOT_FOUND\"}";
+    }
+
+    // 合言葉が既存ルームと衝突した場合(クライアントは再生成して再送する)
+    public static String roomCodeTaken() {
+        return "{\"type\":\"ROOM_CODE_TAKEN\"}";
+    }
+
+    // ゲームを中断せずに画面へ流す通知(タイムアウトスキップ・AI交代など)
+    public static String notice(String message) {
+        return "{\"type\":\"NOTICE\",\"message\":\"" + escapeJson(message) + "\"}";
     }
 
     // --- incoming message parser ---
