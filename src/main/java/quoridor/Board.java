@@ -12,6 +12,7 @@ public class Board {
     private final List<Wall> walls;
     private final List<MiniWall> miniWalls;
     private final List<Trap> traps;
+    private final List<Wall> brokenWalls;
 
     public Board() {
         this(2);
@@ -22,6 +23,7 @@ public class Board {
         walls = new ArrayList<>();
         miniWalls = new ArrayList<>();
         traps = new ArrayList<>();
+        brokenWalls = new ArrayList<>();
     }
 
     private static Player[] createPlayers(int playerCount) {
@@ -59,12 +61,25 @@ public class Board {
         return traps;
     }
 
+    public List<Wall> getBrokenWalls() {
+        return brokenWalls;
+    }
+
     public void addWall(Wall wall) {
         walls.add(wall);
     }
 
     public boolean removeWall(Wall wall) {
         return walls.remove(wall);
+    }
+
+    // 壁を破壊した跡を記録する。その場所には二度と壁を置けなくする
+    public void addBrokenWall(Wall wall) {
+        brokenWalls.add(wall);
+    }
+
+    public boolean isBrokenWallSlot(Wall wall) {
+        return brokenWalls.contains(wall);
     }
 
     public void removeLastWall() {
@@ -175,5 +190,6 @@ public class Board {
         walls.clear();
         miniWalls.clear();
         traps.clear();
+        brokenWalls.clear();
     }
 }

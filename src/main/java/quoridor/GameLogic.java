@@ -77,6 +77,7 @@ public class GameLogic {
         int wx = wall.getX(), wy = wall.getY();
         if (wx < 0 || wx > Board.WALL_MAX - 1 || wy < 0 || wy > Board.WALL_MAX - 1) return false;
 
+        if (board.isBrokenWallSlot(wall)) return false;
         if (wallConflicts(board, wall)) return false;
         if (normalWallConflictsWithMiniWalls(board, wall)) return false;
 

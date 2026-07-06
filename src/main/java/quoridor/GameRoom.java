@@ -243,6 +243,7 @@ public class GameRoom {
         }
 
         board.removeWall(target);
+        board.addBrokenWall(target);
         board.getPlayer(playerId).useSkill();
         board.getPlayer(playerId).setCannotMoveNextTurn(false);
         System.out.println("Player " + playerId + " broke wall " + target);

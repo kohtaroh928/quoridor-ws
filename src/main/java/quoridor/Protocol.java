@@ -47,6 +47,15 @@ public class Protocol {
               .append(",\"y\":").append(w.getY())
               .append(",\"direction\":\"").append(w.getDirection().name()).append("\"}");
         }
+        sb.append("],\"brokenWalls\":[");
+        List<Wall> brokenWalls = board.getBrokenWalls();
+        for (int i = 0; i < brokenWalls.size(); i++) {
+            Wall w = brokenWalls.get(i);
+            if (i > 0) sb.append(',');
+            sb.append("{\"x\":").append(w.getX())
+              .append(",\"y\":").append(w.getY())
+              .append(",\"direction\":\"").append(w.getDirection().name()).append("\"}");
+        }
         sb.append("],\"ownTraps\":[");
         int trapCount = 0;
         for (Trap trap : board.getTraps()) {

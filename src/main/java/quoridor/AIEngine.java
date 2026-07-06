@@ -15,6 +15,7 @@ public class AIEngine {
         List<int[]> walls = new ArrayList<>();      // {x, y, h(1=水平)}
         List<int[]> miniWalls = new ArrayList<>();  // {x, y, h}
         List<int[]> traps = new ArrayList<>();      // {x, y, owner}
+        List<int[]> brokenWalls = new ArrayList<>(); // {x, y, h} 破壊済みで再設置できない壁
         int[] wallsRemaining;
         boolean characterMode;
         CharacterType[] characters;
@@ -30,6 +31,7 @@ public class AIEngine {
             for (int[] w : walls) s.walls.add(w);
             for (int[] w : miniWalls) s.miniWalls.add(w);
             for (int[] t : traps) s.traps.add(t.clone());
+            for (int[] w : brokenWalls) s.brokenWalls.add(w);
             s.wallsRemaining = wallsRemaining.clone();
             s.characterMode = characterMode;
             s.characters = characters.clone();
@@ -71,6 +73,8 @@ public class AIEngine {
         for (Trap t : board.getTraps())
             if (t.isActive())
                 s.traps.add(new int[]{t.getX(), t.getY(), t.getOwnerPlayerId()});
+        for (Wall w : board.getBrokenWalls())
+            s.brokenWalls.add(new int[]{w.getX(), w.getY(), w.getDirection() == Wall.Direction.HORIZONTAL ? 1 : 0});
         return s;
     }
 
@@ -401,11 +405,18 @@ public class AIEngine {
     private static boolean isValidWall(State s, int player, int x, int y, boolean h) {
         if (s.wallsRemaining[player - 1] <= 0 || x < 0 || x > 7 || y < 0 || y > 7) return false;
         int[] w = {x, y, h ? 1 : 0};
+        if (isBrokenWallSlot(s, w)) return false;
         if (wallConflicts(s, w)) return false;
         if (normalWallConflictsWithMiniWalls(s, w)) return false;
         State tmp = s.copy();
         tmp.walls.add(w);
         return !anyPlayerTrapped(tmp);
+    }
+
+    private static boolean isBrokenWallSlot(State s, int[] w) {
+        for (int[] b : s.brokenWalls)
+            if (b[0] == w[0] && b[1] == w[1] && b[2] == w[2]) return true;
+        return false;
     }
 
     private static boolean wallConflicts(State s, int[] nw) {
@@ -518,6 +529,7 @@ public class AIEngine {
             case Move.BREAK_WALL: {
                 int h = m.horizontal ? 1 : 0;
                 s.walls.removeIf(w -> w[0] == m.x && w[1] == m.y && w[2] == h);
+                s.brokenWalls.add(new int[]{m.x, m.y, h});
                 s.skillRemaining[idx]--;
                 s.cannotMove[idx] = false;
                 return s;
