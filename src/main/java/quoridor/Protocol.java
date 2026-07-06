@@ -113,6 +113,31 @@ public class Protocol {
         return sb.toString();
     }
 
+    // ロビー(準備待ち)中に、全員のプロフィール・準備状況・ルーム設定を通知する。
+    // youは受信者自身の座席番号(1始まり)
+    public static String lobbyUpdate(GameRoom.Seat[] seats, boolean[] ready, boolean characterMode,
+                                      boolean obstacleMode, int timeLimit, int players, int you) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"type\":\"LOBBY_UPDATE\",\"you\":").append(you);
+        sb.append(",\"seats\":[");
+        for (int i = 0; i < seats.length; i++) {
+            GameRoom.Seat s = seats[i];
+            if (i > 0) sb.append(',');
+            boolean isReady = s.ai || (ready != null && i < ready.length && ready[i]);
+            sb.append("{\"name\":\"").append(escapeJson(s.name == null ? "" : s.name))
+              .append("\",\"avatarId\":").append(s.avatarId)
+              .append(",\"ai\":").append(s.ai)
+              .append(",\"ready\":").append(isReady)
+              .append('}');
+        }
+        sb.append("],\"characterMode\":").append(characterMode);
+        sb.append(",\"obstacleMode\":").append(obstacleMode);
+        sb.append(",\"timeLimit\":").append(timeLimit);
+        sb.append(",\"players\":").append(players);
+        sb.append('}');
+        return sb.toString();
+    }
+
     public static String gameEnd(int winner) {
         return "{\"type\":\"GAME_END\",\"winner\":" + winner + "}";
     }
@@ -357,6 +382,15 @@ public class Protocol {
                         case '"': case '\\': case '/': sb.append(esc); break;
                         case 'n': sb.append('\n'); break;
                         case 't': sb.append('\t'); break;
+                        case 'r': sb.append('\r'); break;
+                        case 'b': sb.append('\b'); break;
+                        case 'f': sb.append('\f'); break;
+                        case 'u':
+                            // 4桁16進のUnicodeエスケープ。日本語の名前など非ASCII文字が
+                            // エスケープされて届く場合に対応する
+                            sb.append((char) Integer.parseInt(src.substring(idx + 1, idx + 5), 16));
+                            idx += 4;
+                            break;
                         default: sb.append(esc);
                     }
                 } else {

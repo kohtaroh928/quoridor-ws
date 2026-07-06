@@ -68,10 +68,14 @@ public class WSServer extends WebSocketServer {
         int playerCount = parsePlayerCount(data.get("players"));
         int[] slotAi = parseSlotAi(data.get("slotAi"), playerCount);
         CharacterType hostCharacter = parseCharacter((String) data.get("character"), characterMode);
+        String hostName = parseName(data.get("playerName"));
+        int hostAvatarId = parseAvatarId(data.get("avatarId"));
 
         PendingRoom pending = new PendingRoom(code, characterMode, obstacleMode, timeLimit, playerCount, slotAi);
         pending.humans.add(conn);
         pending.characters.add(hostCharacter);
+        pending.names.add(hostName);
+        pending.avatarIds.add(hostAvatarId);
 
         System.out.println("Room created: " + code + " (players=" + playerCount
                 + ", humans=" + pending.humansNeeded + ", timeLimit=" + timeLimit + ")");
@@ -107,6 +111,8 @@ public class WSServer extends WebSocketServer {
 
         pending.humans.add(conn);
         pending.characters.add(CharacterType.NONE);
+        pending.names.add(parseName(data.get("playerName")));
+        pending.avatarIds.add(parseAvatarId(data.get("avatarId")));
         conn.send(Protocol.joined(pending.characterMode, pending.obstacleMode,
                 pending.playerCount, pending.timeLimit));
         System.out.println("Player joined room: " + code
@@ -150,7 +156,9 @@ public class WSServer extends WebSocketServer {
                 seats.add(GameRoom.Seat.aiSeat(pending.slotAi[i]));
             } else {
                 seats.add(GameRoom.Seat.human(pending.humans.get(humanIdx),
-                        pending.characters.get(humanIdx)));
+                        pending.characters.get(humanIdx),
+                        pending.names.get(humanIdx),
+                        pending.avatarIds.get(humanIdx)));
                 humanIdx++;
             }
         }
@@ -161,8 +169,8 @@ public class WSServer extends WebSocketServer {
             playerRoomCodes.put(s, pending.code);
         }
         roomsByCode.put(pending.code, gameRoom);
-        gameRoom.startGame();
-        System.out.println("Room " + pending.code + ": game started ("
+        gameRoom.enterLobby();
+        System.out.println("Room " + pending.code + ": seats full, entering lobby ("
                 + pending.playerCount + " players, " + pending.humans.size() + " humans)");
         return true;
     }
@@ -180,6 +188,8 @@ public class WSServer extends WebSocketServer {
 
             pending.humans.remove(idx);
             pending.characters.remove(idx);
+            pending.names.remove(idx);
+            pending.avatarIds.remove(idx);
             if (pending.humans.isEmpty()) {
                 it.remove();
             } else {
@@ -247,6 +257,19 @@ public class WSServer extends WebSocketServer {
         return character;
     }
 
+    // プレイヤー名は最大20文字。前後の空白を除去する
+    private String parseName(Object raw) {
+        if (!(raw instanceof String)) return "";
+        String name = ((String) raw).trim();
+        return name.length() > 20 ? name.substring(0, 20) : name;
+    }
+
+    // アバターID(-1=未設定、0以上=プリセット番号)
+    private int parseAvatarId(Object raw) {
+        if (!(raw instanceof Number)) return -1;
+        return ((Number) raw).intValue();
+    }
+
     private int parsePlayerCount(Object raw) {
         if (raw == null) return 2;
         int n = ((Number) raw).intValue();
@@ -285,6 +308,8 @@ public class WSServer extends WebSocketServer {
         final int humansNeeded;
         final List<WebSocket> humans = new ArrayList<>();
         final List<CharacterType> characters = new ArrayList<>();
+        final List<String> names = new ArrayList<>();
+        final List<Integer> avatarIds = new ArrayList<>();
 
         PendingRoom(String code, boolean characterMode, boolean obstacleMode,
                     int timeLimit, int playerCount, int[] slotAi) {

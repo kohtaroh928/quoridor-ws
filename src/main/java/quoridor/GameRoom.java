@@ -31,11 +31,15 @@ public class GameRoom {
         boolean ai;
         int aiDifficulty;
         CharacterType character = CharacterType.NONE;
+        String name = "";
+        int avatarId = -1;
 
-        public static Seat human(WebSocket conn, CharacterType character) {
+        public static Seat human(WebSocket conn, CharacterType character, String name, int avatarId) {
             Seat s = new Seat();
             s.conn = conn;
             s.character = character == null ? CharacterType.NONE : character;
+            s.name = name == null ? "" : name;
+            s.avatarId = avatarId;
             return s;
         }
 
@@ -55,6 +59,8 @@ public class GameRoom {
     private int currentPlayer = 1;
     private boolean gameOver = false;
     private boolean dissolved = false;
+    private boolean started = false; // trueになるまではロビー(準備待ち)状態
+    private final boolean[] readyFlags;
     private final boolean[] rematchRequested;
 
     // ターンごとに増える通し番号。古いタイマー/AIタスクの誤発火を防ぐ
@@ -69,6 +75,7 @@ public class GameRoom {
         this.obstacleMode = obstacleMode;
         this.timeLimit = timeLimit;
         this.rematchRequested = new boolean[this.seats.length];
+        this.readyFlags = new boolean[this.seats.length];
 
         if (this.characterMode) {
             Random random = new Random();
@@ -86,7 +93,16 @@ public class GameRoom {
         }
     }
 
-    public synchronized void startGame() {
+    // 席が揃った直後に呼ぶ。まだ対局は開始せず、ロビー(準備待ち)状態にして
+    // 全員のプロフィール・準備状況を通知する
+    public synchronized void enterLobby() {
+        broadcastLobby();
+        System.out.println("Room entered lobby. (" + seats.length + " players, "
+                + humanCount() + " humans, timeLimit=" + timeLimit + ")");
+    }
+
+    private synchronized void startGame() {
+        started = true;
         for (int i = 0; i < seats.length; i++) {
             send(seats[i].conn, Protocol.gameStart(i + 1));
         }
@@ -96,6 +112,35 @@ public class GameRoom {
                 + humanCount() + " humans, timeLimit=" + timeLimit + ")");
     }
 
+    private void handleReady(int playerId) {
+        if (started || dissolved) return;
+        Seat seat = seats[playerId - 1];
+        if (seat.ai) return;
+        readyFlags[playerId - 1] = true;
+        System.out.println("Player " + playerId + " is ready.");
+
+        boolean allReady = true;
+        for (int i = 0; i < seats.length; i++) {
+            if (seats[i].ai) continue; // AI席は自動で準備完了扱い
+            if (!readyFlags[i]) { allReady = false; break; }
+        }
+
+        if (allReady) {
+            startGame();
+        } else {
+            broadcastLobby();
+        }
+    }
+
+    private void broadcastLobby() {
+        for (int i = 0; i < seats.length; i++) {
+            if (seats[i].conn != null) {
+                send(seats[i].conn, Protocol.lobbyUpdate(seats, readyFlags, characterMode, obstacleMode,
+                        timeLimit, seats.length, i + 1));
+            }
+        }
+    }
+
     public synchronized void onMessage(WebSocket conn, String message) {
         int playerId = seatOf(conn);
         if (playerId <= 0) return;
@@ -103,6 +148,13 @@ public class GameRoom {
         try {
             java.util.Map<String, Object> data = Protocol.parseJson(message);
             String type = (String) data.get("type");
+
+            if ("READY".equals(type)) {
+                handleReady(playerId);
+                return;
+            }
+
+            if (!started) return; // ロビー中は準備完了メッセージ以外を無視する
 
             if ("REMATCH".equals(type)) {
                 handleRematch(playerId);
@@ -430,6 +482,16 @@ public class GameRoom {
         if (playerId <= 0) return;
         Seat seat = seats[playerId - 1];
         seat.conn = null;
+
+        if (!started) {
+            // ロビー(準備待ち)中の離脱は対局が始まっていないため、そのままルームを解散する
+            dissolved = true;
+            cancelPendingTask();
+            for (Seat s : seats) {
+                if (s.conn != null && s.conn.isOpen()) send(s.conn, Protocol.roomClosed());
+            }
+            return;
+        }
 
         if (!gameOver) {
             if (seats.length == 2) {
