@@ -82,7 +82,8 @@ public class WSServer extends WebSocketServer {
 
         if (!tryStart(pending)) {
             waitingRooms.put(code, pending);
-            conn.send(Protocol.waiting(code, 1, pending.humansNeeded));
+            // ホストは即座にロビー画面へ。他の席は参加者が入るまで空欄で表示される
+            broadcastPendingLobby(pending);
         }
     }
 
@@ -119,9 +120,9 @@ public class WSServer extends WebSocketServer {
                 + " (" + pending.humans.size() + "/" + pending.humansNeeded + ")");
 
         if (!tryStart(pending)) {
-            for (WebSocket s : pending.humans) {
-                send(s, Protocol.waiting(code, pending.humans.size(), pending.humansNeeded));
-            }
+            // 既存メンバーには空き枠が埋まったことを、この参加者にはキャラクター選択が
+            // 不要な場合に限りロビー画面を即座に届ける
+            broadcastPendingLobby(pending);
         }
     }
 
@@ -133,7 +134,7 @@ public class WSServer extends WebSocketServer {
 
             CharacterType character = parseCharacter((String) data.get("character"), pending.characterMode);
             pending.characters.set(idx, character);
-            tryStart(pending);
+            if (!tryStart(pending)) broadcastPendingLobby(pending);
             return;
         }
     }
@@ -175,6 +176,43 @@ public class WSServer extends WebSocketServer {
         return true;
     }
 
+    // 埋まっている席はSeat、まだ人間が参加していない席は空のSeat(未参加)として並べる
+    private GameRoom.Seat[] buildPendingSeats(PendingRoom pending) {
+        GameRoom.Seat[] seats = new GameRoom.Seat[pending.playerCount];
+        int humanIdx = 0;
+        for (int i = 0; i < pending.playerCount; i++) {
+            if (pending.slotAi[i] > 0) {
+                seats[i] = GameRoom.Seat.aiSeat(pending.slotAi[i]);
+            } else if (humanIdx < pending.humans.size()) {
+                seats[i] = GameRoom.Seat.human(pending.humans.get(humanIdx),
+                        pending.characters.get(humanIdx), pending.names.get(humanIdx),
+                        pending.avatarIds.get(humanIdx));
+                humanIdx++;
+            } else {
+                seats[i] = new GameRoom.Seat(); // 空席(未参加)
+            }
+        }
+        return seats;
+    }
+
+    // ルームが満員になる前に、現時点の座席状況(空席込み)をロビー画面として配信する。
+    // キャラクター選択が未完了の参加者本人には、選択が終わるまで送らない
+    private void broadcastPendingLobby(PendingRoom pending) {
+        GameRoom.Seat[] seats = buildPendingSeats(pending);
+        int humanIdx = 0;
+        for (int i = 0; i < pending.playerCount && humanIdx < pending.humans.size(); i++) {
+            if (pending.slotAi[i] > 0) continue;
+            WebSocket conn = pending.humans.get(humanIdx);
+            boolean needsCharacter = pending.characterMode
+                    && pending.characters.get(humanIdx) == CharacterType.NONE;
+            if (!needsCharacter) {
+                send(conn, Protocol.lobbyUpdate(seats, null, pending.characterMode, pending.obstacleMode,
+                        pending.timeLimit, pending.playerCount, i + 1));
+            }
+            humanIdx++;
+        }
+    }
+
     @Override
     public synchronized void onClose(WebSocket conn, int code, String reason, boolean remote) {
         System.out.println("Disconnected: " + conn.getRemoteSocketAddress());
@@ -193,9 +231,7 @@ public class WSServer extends WebSocketServer {
             if (pending.humans.isEmpty()) {
                 it.remove();
             } else {
-                for (WebSocket s : pending.humans) {
-                    send(s, Protocol.waiting(entry.getKey(), pending.humans.size(), pending.humansNeeded));
-                }
+                broadcastPendingLobby(pending);
             }
             break;
         }

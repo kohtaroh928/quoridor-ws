@@ -124,10 +124,12 @@ public class Protocol {
             GameRoom.Seat s = seats[i];
             if (i > 0) sb.append(',');
             boolean isReady = s.ai || (ready != null && i < ready.length && ready[i]);
+            boolean joined = s.ai || s.conn != null;
             sb.append("{\"name\":\"").append(escapeJson(s.name == null ? "" : s.name))
               .append("\",\"avatarId\":").append(s.avatarId)
               .append(",\"ai\":").append(s.ai)
               .append(",\"ready\":").append(isReady)
+              .append(",\"joined\":").append(joined)
               .append('}');
         }
         sb.append("],\"characterMode\":").append(characterMode);
@@ -152,11 +154,6 @@ public class Protocol {
 
     public static String roomClosed() {
         return "{\"type\":\"ROOM_CLOSED\"}";
-    }
-
-    public static String waiting(String room, int joined, int needed) {
-        return "{\"type\":\"WAITING\",\"room\":\"" + escapeJson(room)
-            + "\",\"joined\":" + joined + ",\"needed\":" + needed + "}";
     }
 
     // ルーム参加成功時に、参加者へルーム設定を伝える
