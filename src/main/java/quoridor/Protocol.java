@@ -130,6 +130,8 @@ public class Protocol {
               .append(",\"ai\":").append(s.ai)
               .append(",\"ready\":").append(isReady)
               .append(",\"joined\":").append(joined)
+              .append(",\"difficulty\":").append(s.aiDifficulty)
+              .append(",\"character\":\"").append(s.character.name()).append('"')
               .append('}');
         }
         sb.append("],\"characterMode\":").append(characterMode);

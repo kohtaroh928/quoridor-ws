@@ -53,9 +53,9 @@ public class GameRoom {
 
     private final Seat[] seats;
     private final Board board;
-    private final boolean characterMode;
-    private final boolean obstacleMode;
-    private final int timeLimit; // 1ターンの秒数(0=無制限)
+    private boolean characterMode;
+    private boolean obstacleMode;
+    private int timeLimit; // 1ターンの秒数(0=無制限)。ロビー中はホストが変更できる
     private int currentPlayer = 1;
     private boolean gameOver = false;
     private boolean dissolved = false;
@@ -116,6 +116,10 @@ public class GameRoom {
         if (started || dissolved) return;
         Seat seat = seats[playerId - 1];
         if (seat.ai) return;
+        if (characterMode && seat.character == CharacterType.NONE) {
+            send(seat.conn, Protocol.error("先にキャラクターを選んでください"));
+            return;
+        }
         readyFlags[playerId - 1] = true;
         System.out.println("Player " + playerId + " is ready.");
 
@@ -141,6 +145,134 @@ public class GameRoom {
         }
     }
 
+    // --- lobby rule / seat configuration (ホストが対局準備ロビーで行う設定変更) ---
+
+    // ロビー内で参加者本人が、自分のキャラクターを選ぶ/選び直す
+    private void handleSetCharacterInLobby(int playerId, String raw) {
+        if (started || dissolved || !characterMode) return;
+        Seat seat = seats[playerId - 1];
+        if (seat.ai || raw == null) return;
+        CharacterType character;
+        try {
+            character = CharacterType.valueOf(raw.trim().toUpperCase());
+        } catch (IllegalArgumentException e) {
+            return;
+        }
+        if (character == CharacterType.NONE) return;
+        seat.character = character;
+        board.getPlayer(playerId).setCharacter(character);
+        System.out.println("Player " + playerId + " picked character " + character);
+        broadcastLobby();
+    }
+
+    // ホスト(P1)のみ: P2以降の席をAI(強さ指定)⇔オンライン参加待ちに切り替える
+    private void handleSetSeatMode(int playerId, java.util.Map<String, Object> data) {
+        if (started || dissolved || playerId != 1) return;
+        Object rawSeat = data.get("seat");
+        if (!(rawSeat instanceof Number)) return;
+        int seatIdx = ((Number) rawSeat).intValue() - 1;
+        if (seatIdx <= 0 || seatIdx >= seats.length) return; // ホスト自身の席(0)は対象外
+
+        Seat seat = seats[seatIdx];
+        if (!seat.ai && seat.conn != null) return; // 既に人間が参加済みの席は変更できない
+
+        String mode = (String) data.get("mode");
+        Random random = new Random();
+        if ("AI".equals(mode)) {
+            int difficulty = data.get("difficulty") instanceof Number
+                    ? ((Number) data.get("difficulty")).intValue() : 2;
+            seat.ai = true;
+            seat.aiDifficulty = Math.max(1, Math.min(3, difficulty));
+            seat.conn = null;
+            if (characterMode) seat.character = AI_CHARACTERS[random.nextInt(AI_CHARACTERS.length)];
+        } else if ("OPEN".equals(mode)) {
+            seat.ai = false;
+            seat.conn = null;
+            seat.name = "";
+            seat.avatarId = -1;
+            seat.character = CharacterType.NONE;
+        } else {
+            return;
+        }
+        board.getPlayer(seatIdx + 1).setCharacter(seat.character);
+        System.out.println("Seat " + (seatIdx + 1) + " set to " + mode);
+        broadcastLobby();
+    }
+
+    // ホスト(P1)のみ: キャラクター/障害物モード・時間制限を変更する
+    private void handleUpdateRoomSettings(int playerId, java.util.Map<String, Object> data) {
+        if (started || dissolved || playerId != 1) return;
+
+        boolean newCharacterMode = Boolean.TRUE.equals(data.get("characterMode"));
+        boolean newObstacleMode = Boolean.TRUE.equals(data.get("obstacleMode"));
+        Object rawLimit = data.get("timeLimit");
+        int newTimeLimit = rawLimit instanceof Number
+                ? Math.max(0, Math.min(600, ((Number) rawLimit).intValue())) : timeLimit;
+
+        timeLimit = newTimeLimit;
+
+        if (newCharacterMode != characterMode) {
+            characterMode = newCharacterMode;
+            reassignCharacters();
+        }
+        if (newObstacleMode != obstacleMode) {
+            obstacleMode = newObstacleMode;
+            board.reset(); // 対局開始前なので、盤面(壁配置)を作り直しても問題ない
+            if (obstacleMode) GameLogic.placeObstacleWalls(board, new Random());
+        }
+        System.out.println("Room settings updated: characterMode=" + characterMode
+                + ", obstacleMode=" + obstacleMode + ", timeLimit=" + timeLimit);
+        broadcastLobby();
+    }
+
+    // characterModeの切り替え時に、AI席へはランダムでキャラクターを割り当て、
+    // 人間の席は選択待ち(NONE)に戻す
+    private void reassignCharacters() {
+        Random random = new Random();
+        for (int i = 0; i < seats.length; i++) {
+            Seat seat = seats[i];
+            if (!characterMode) {
+                seat.character = CharacterType.NONE;
+            } else if (seat.ai) {
+                seat.character = AI_CHARACTERS[random.nextInt(AI_CHARACTERS.length)];
+            } else {
+                seat.character = CharacterType.NONE;
+            }
+            board.getPlayer(i + 1).setCharacter(seat.character);
+        }
+    }
+
+    // --- late join: ホストが開けたオンライン参加待ちの席に、対局開始前なら参加できる ---
+
+    public synchronized boolean canJoin() {
+        if (started || dissolved) return false;
+        for (Seat seat : seats) {
+            if (!seat.ai && seat.conn == null) return true;
+        }
+        return false;
+    }
+
+    // 空いている席に参加者をアタッチする。成功したら座席番号(1始まり)、できなければ-1を返す
+    public synchronized int attachHuman(WebSocket conn, String name, int avatarId) {
+        for (int i = 0; i < seats.length; i++) {
+            Seat seat = seats[i];
+            if (!seat.ai && seat.conn == null) {
+                seat.conn = conn;
+                seat.name = name == null ? "" : name;
+                seat.avatarId = avatarId;
+                seat.character = CharacterType.NONE;
+                broadcastLobby();
+                return i + 1;
+            }
+        }
+        return -1;
+    }
+
+    public boolean getCharacterMode() { return characterMode; }
+    public boolean getObstacleMode() { return obstacleMode; }
+    public int getTimeLimit() { return timeLimit; }
+    public int getPlayerCount() { return seats.length; }
+
     public synchronized void onMessage(WebSocket conn, String message) {
         int playerId = seatOf(conn);
         if (playerId <= 0) return;
@@ -153,8 +285,20 @@ public class GameRoom {
                 handleReady(playerId);
                 return;
             }
+            if ("SET_CHARACTER".equals(type)) {
+                handleSetCharacterInLobby(playerId, (String) data.get("character"));
+                return;
+            }
+            if ("SET_SEAT_MODE".equals(type)) {
+                handleSetSeatMode(playerId, data);
+                return;
+            }
+            if ("UPDATE_ROOM_SETTINGS".equals(type)) {
+                handleUpdateRoomSettings(playerId, data);
+                return;
+            }
 
-            if (!started) return; // ロビー中は準備完了メッセージ以外を無視する
+            if (!started) return; // ロビー中は上記のロビー操作メッセージ以外を無視する
 
             if ("REMATCH".equals(type)) {
                 handleRematch(playerId);

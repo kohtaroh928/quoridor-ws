@@ -41,6 +41,8 @@ public class WSServer extends WebSocketServer {
                 handleJoin(conn, data);
             } else if ("SET_CHARACTER".equals(type)) {
                 handleSetCharacter(conn, data);
+            } else if ("UPDATE_ROOM_SETTINGS".equals(type)) {
+                handleUpdateRoomSettings(conn, data);
             } else if ("REMATCH".equals(type)) {
                 // 解散済みルームの生き残りが再戦を押した場合
                 conn.send(Protocol.roomClosed());
@@ -97,6 +99,20 @@ public class WSServer extends WebSocketServer {
 
         PendingRoom pending = waitingRooms.get(code);
         if (pending == null) {
+            // ホストがロビーで開けたオンライン参加待ちの席があれば、そこに参加できる
+            GameRoom existing = roomsByCode.get(code);
+            if (existing != null && existing.canJoin()) {
+                int seatId = existing.attachHuman(conn, parseName(data.get("playerName")),
+                        parseAvatarId(data.get("avatarId")));
+                if (seatId > 0) {
+                    rooms.put(conn, existing);
+                    playerRoomCodes.put(conn, code);
+                    conn.send(Protocol.joined(existing.getCharacterMode(), existing.getObstacleMode(),
+                            existing.getPlayerCount(), existing.getTimeLimit()));
+                    System.out.println("Player joined open seat in room: " + code);
+                    return;
+                }
+            }
             // 対局中(=満員)のルームか、存在しないルームか
             if (roomsByCode.containsKey(code)) {
                 conn.send(Protocol.roomFull());
@@ -135,6 +151,27 @@ public class WSServer extends WebSocketServer {
             CharacterType character = parseCharacter((String) data.get("character"), pending.characterMode);
             pending.characters.set(idx, character);
             if (!tryStart(pending)) broadcastPendingLobby(pending);
+            return;
+        }
+    }
+
+    // ホストが対局準備ロビーでキャラクター/障害物モード・時間制限を変更する
+    private void handleUpdateRoomSettings(WebSocket conn, Map<String, Object> data) {
+        for (PendingRoom pending : waitingRooms.values()) {
+            if (pending.humans.isEmpty() || pending.humans.get(0) != conn) continue;
+
+            boolean characterMode = parseBool(data.get("characterMode"));
+            boolean obstacleMode = parseBool(data.get("obstacleMode"));
+            int timeLimit = parseTimeLimit(data.get("timeLimit"));
+
+            if (characterMode != pending.characterMode) {
+                Collections.fill(pending.characters, CharacterType.NONE);
+            }
+            pending.characterMode = characterMode;
+            pending.obstacleMode = obstacleMode;
+            pending.timeLimit = timeLimit;
+
+            broadcastPendingLobby(pending);
             return;
         }
     }
@@ -203,12 +240,8 @@ public class WSServer extends WebSocketServer {
         for (int i = 0; i < pending.playerCount && humanIdx < pending.humans.size(); i++) {
             if (pending.slotAi[i] > 0) continue;
             WebSocket conn = pending.humans.get(humanIdx);
-            boolean needsCharacter = pending.characterMode
-                    && pending.characters.get(humanIdx) == CharacterType.NONE;
-            if (!needsCharacter) {
-                send(conn, Protocol.lobbyUpdate(seats, null, pending.characterMode, pending.obstacleMode,
-                        pending.timeLimit, pending.playerCount, i + 1));
-            }
+            send(conn, Protocol.lobbyUpdate(seats, null, pending.characterMode, pending.obstacleMode,
+                    pending.timeLimit, pending.playerCount, i + 1));
             humanIdx++;
         }
     }
@@ -336,9 +369,9 @@ public class WSServer extends WebSocketServer {
 
     private static class PendingRoom {
         final String code;
-        final boolean characterMode;
-        final boolean obstacleMode;
-        final int timeLimit;
+        boolean characterMode;
+        boolean obstacleMode;
+        int timeLimit;
         final int playerCount;
         final int[] slotAi;
         final int humansNeeded;
