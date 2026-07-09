@@ -6,13 +6,15 @@ import org.java_websocket.server.WebSocketServer;
 
 import java.net.InetSocketAddress;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class WSServer extends WebSocketServer {
 
+    private final Object lobbyLock = new Object();
     private final Map<String, PendingRoom> waitingRooms = new HashMap<>();
-    private final Map<String, GameRoom> roomsByCode = new HashMap<>();
-    private final Map<WebSocket, GameRoom> rooms = new HashMap<>();
-    private final Map<WebSocket, String> playerRoomCodes = new HashMap<>();
+    private final Map<String, GameRoom> roomsByCode = new ConcurrentHashMap<>();
+    private final Map<WebSocket, GameRoom> rooms = new ConcurrentHashMap<>();
+    private final Map<WebSocket, String> playerRoomCodes = new ConcurrentHashMap<>();
 
     public WSServer(int port) {
         super(new InetSocketAddress(port));
@@ -24,7 +26,7 @@ public class WSServer extends WebSocketServer {
     }
 
     @Override
-    public synchronized void onMessage(WebSocket conn, String message) {
+    public void onMessage(WebSocket conn, String message) {
         GameRoom room = rooms.get(conn);
         if (room != null) {
             room.onMessage(conn, message);
@@ -54,125 +56,133 @@ public class WSServer extends WebSocketServer {
 
     // ホストが設定・スロット構成付きでルームを作成する
     private void handleCreateRoom(WebSocket conn, Map<String, Object> data) {
-        String code = normalizeCode((String) data.get("room"));
-        if (code == null) {
-            conn.send(Protocol.error("Room code is required"));
-            return;
-        }
-        if (waitingRooms.containsKey(code) || roomsByCode.containsKey(code)) {
-            conn.send(Protocol.roomCodeTaken());
-            return;
-        }
+        synchronized (lobbyLock) {
+            String code = normalizeCode((String) data.get("room"));
+            if (code == null) {
+                conn.send(Protocol.error("Room code is required"));
+                return;
+            }
+            if (waitingRooms.containsKey(code) || roomsByCode.containsKey(code)) {
+                conn.send(Protocol.roomCodeTaken());
+                return;
+            }
 
-        boolean characterMode = parseBool(data.get("characterMode"));
-        boolean obstacleMode = parseBool(data.get("obstacleMode"));
-        int timeLimit = parseTimeLimit(data.get("timeLimit"));
-        int playerCount = parsePlayerCount(data.get("players"));
-        int[] slotAi = parseSlotAi(data.get("slotAi"), playerCount);
-        CharacterType hostCharacter = parseCharacter((String) data.get("character"), characterMode);
-        String hostName = parseName(data.get("playerName"));
-        int hostAvatarId = parseAvatarId(data.get("avatarId"));
+            boolean characterMode = parseBool(data.get("characterMode"));
+            boolean obstacleMode = parseBool(data.get("obstacleMode"));
+            int timeLimit = parseTimeLimit(data.get("timeLimit"));
+            int playerCount = parsePlayerCount(data.get("players"));
+            int[] slotAi = parseSlotAi(data.get("slotAi"), playerCount);
+            CharacterType hostCharacter = parseCharacter((String) data.get("character"), characterMode);
+            String hostName = parseName(data.get("playerName"));
+            int hostAvatarId = parseAvatarId(data.get("avatarId"));
 
-        PendingRoom pending = new PendingRoom(code, characterMode, obstacleMode, timeLimit, playerCount, slotAi);
-        pending.humans.add(conn);
-        pending.characters.add(hostCharacter);
-        pending.names.add(hostName);
-        pending.avatarIds.add(hostAvatarId);
+            PendingRoom pending = new PendingRoom(code, characterMode, obstacleMode, timeLimit, playerCount, slotAi);
+            pending.humans.add(conn);
+            pending.characters.add(hostCharacter);
+            pending.names.add(hostName);
+            pending.avatarIds.add(hostAvatarId);
 
-        System.out.println("Room created: " + code + " (players=" + playerCount
-                + ", humans=" + pending.humansNeeded + ", timeLimit=" + timeLimit + ")");
+            System.out.println("Room created: " + code + " (players=" + playerCount
+                    + ", humans=" + pending.humansNeeded + ", timeLimit=" + timeLimit + ")");
 
-        if (!tryStart(pending)) {
-            waitingRooms.put(code, pending);
-            // ホストは即座にロビー画面へ。他の席は参加者が入るまで空欄で表示される
-            broadcastPendingLobby(pending);
+            if (!tryStart(pending)) {
+                waitingRooms.put(code, pending);
+                // ホストは即座にロビー画面へ。他の席は参加者が入るまで空欄で表示される
+                broadcastPendingLobby(pending);
+            }
         }
     }
 
     // 合言葉でルームに参加する
     private void handleJoin(WebSocket conn, Map<String, Object> data) {
-        String code = normalizeCode((String) data.get("room"));
-        if (code == null) {
-            conn.send(Protocol.error("Room code is required"));
-            return;
-        }
+        synchronized (lobbyLock) {
+            String code = normalizeCode((String) data.get("room"));
+            if (code == null) {
+                conn.send(Protocol.error("Room code is required"));
+                return;
+            }
 
-        PendingRoom pending = waitingRooms.get(code);
-        if (pending == null) {
-            // ホストがロビーで開けたオンライン参加待ちの席があれば、そこに参加できる
-            GameRoom existing = roomsByCode.get(code);
-            if (existing != null && existing.canJoin()) {
-                int seatId = existing.attachHuman(conn, parseName(data.get("playerName")),
-                        parseAvatarId(data.get("avatarId")));
-                if (seatId > 0) {
-                    rooms.put(conn, existing);
-                    playerRoomCodes.put(conn, code);
-                    conn.send(Protocol.joined(existing.getCharacterMode(), existing.getObstacleMode(),
-                            existing.getPlayerCount(), existing.getTimeLimit()));
-                    System.out.println("Player joined open seat in room: " + code);
-                    return;
+            PendingRoom pending = waitingRooms.get(code);
+            if (pending == null) {
+                // ホストがロビーで開けたオンライン参加待ちの席があれば、そこに参加できる
+                GameRoom existing = roomsByCode.get(code);
+                if (existing != null && existing.canJoin()) {
+                    int seatId = existing.attachHuman(conn, parseName(data.get("playerName")),
+                            parseAvatarId(data.get("avatarId")));
+                    if (seatId > 0) {
+                        rooms.put(conn, existing);
+                        playerRoomCodes.put(conn, code);
+                        conn.send(Protocol.joined(existing.getCharacterMode(), existing.getObstacleMode(),
+                                existing.getPlayerCount(), existing.getTimeLimit()));
+                        System.out.println("Player joined open seat in room: " + code);
+                        return;
+                    }
                 }
+                // 対局中(=満員)のルームか、存在しないルームか
+                if (roomsByCode.containsKey(code)) {
+                    conn.send(Protocol.roomFull());
+                } else {
+                    conn.send(Protocol.roomNotFound());
+                }
+                return;
             }
-            // 対局中(=満員)のルームか、存在しないルームか
-            if (roomsByCode.containsKey(code)) {
+            if (pending.isFull()) {
                 conn.send(Protocol.roomFull());
-            } else {
-                conn.send(Protocol.roomNotFound());
+                return;
             }
-            return;
-        }
-        if (pending.isFull()) {
-            conn.send(Protocol.roomFull());
-            return;
-        }
 
-        pending.humans.add(conn);
-        pending.characters.add(CharacterType.NONE);
-        pending.names.add(parseName(data.get("playerName")));
-        pending.avatarIds.add(parseAvatarId(data.get("avatarId")));
-        conn.send(Protocol.joined(pending.characterMode, pending.obstacleMode,
-                pending.playerCount, pending.timeLimit));
-        System.out.println("Player joined room: " + code
-                + " (" + pending.humans.size() + "/" + pending.humansNeeded + ")");
+            pending.humans.add(conn);
+            pending.characters.add(CharacterType.NONE);
+            pending.names.add(parseName(data.get("playerName")));
+            pending.avatarIds.add(parseAvatarId(data.get("avatarId")));
+            conn.send(Protocol.joined(pending.characterMode, pending.obstacleMode,
+                    pending.playerCount, pending.timeLimit));
+            System.out.println("Player joined room: " + code
+                    + " (" + pending.humans.size() + "/" + pending.humansNeeded + ")");
 
-        if (!tryStart(pending)) {
-            // 既存メンバーには空き枠が埋まったことを、この参加者にはキャラクター選択が
-            // 不要な場合に限りロビー画面を即座に届ける
-            broadcastPendingLobby(pending);
+            if (!tryStart(pending)) {
+                // 既存メンバーには空き枠が埋まったことを、この参加者にはキャラクター選択が
+                // 不要な場合に限りロビー画面を即座に届ける
+                broadcastPendingLobby(pending);
+            }
         }
     }
 
     // キャラクターモードのルームで、参加者が自分のキャラクターを選ぶ
     private void handleSetCharacter(WebSocket conn, Map<String, Object> data) {
-        for (PendingRoom pending : waitingRooms.values()) {
-            int idx = pending.humans.indexOf(conn);
-            if (idx < 0) continue;
+        synchronized (lobbyLock) {
+            for (PendingRoom pending : waitingRooms.values()) {
+                int idx = pending.humans.indexOf(conn);
+                if (idx < 0) continue;
 
-            CharacterType character = parseCharacter((String) data.get("character"), pending.characterMode);
-            pending.characters.set(idx, character);
-            if (!tryStart(pending)) broadcastPendingLobby(pending);
-            return;
+                CharacterType character = parseCharacter((String) data.get("character"), pending.characterMode);
+                pending.characters.set(idx, character);
+                if (!tryStart(pending)) broadcastPendingLobby(pending);
+                return;
+            }
         }
     }
 
     // ホストが対局準備ロビーでキャラクター/障害物モード・時間制限を変更する
     private void handleUpdateRoomSettings(WebSocket conn, Map<String, Object> data) {
-        for (PendingRoom pending : waitingRooms.values()) {
-            if (pending.humans.isEmpty() || pending.humans.get(0) != conn) continue;
+        synchronized (lobbyLock) {
+            for (PendingRoom pending : waitingRooms.values()) {
+                if (pending.humans.isEmpty() || pending.humans.get(0) != conn) continue;
 
-            boolean characterMode = parseBool(data.get("characterMode"));
-            boolean obstacleMode = parseBool(data.get("obstacleMode"));
-            int timeLimit = parseTimeLimit(data.get("timeLimit"));
+                boolean characterMode = parseBool(data.get("characterMode"));
+                boolean obstacleMode = parseBool(data.get("obstacleMode"));
+                int timeLimit = parseTimeLimit(data.get("timeLimit"));
 
-            if (characterMode != pending.characterMode) {
-                Collections.fill(pending.characters, CharacterType.NONE);
+                if (characterMode != pending.characterMode) {
+                    Collections.fill(pending.characters, CharacterType.NONE);
+                }
+                pending.characterMode = characterMode;
+                pending.obstacleMode = obstacleMode;
+                pending.timeLimit = timeLimit;
+
+                broadcastPendingLobby(pending);
+                return;
             }
-            pending.characterMode = characterMode;
-            pending.obstacleMode = obstacleMode;
-            pending.timeLimit = timeLimit;
-
-            broadcastPendingLobby(pending);
-            return;
         }
     }
 
@@ -247,26 +257,28 @@ public class WSServer extends WebSocketServer {
     }
 
     @Override
-    public synchronized void onClose(WebSocket conn, int code, String reason, boolean remote) {
+    public void onClose(WebSocket conn, int code, String reason, boolean remote) {
         System.out.println("Disconnected: " + conn.getRemoteSocketAddress());
 
         // 待機中ルームから離脱した場合
-        for (Iterator<Map.Entry<String, PendingRoom>> it = waitingRooms.entrySet().iterator(); it.hasNext(); ) {
-            Map.Entry<String, PendingRoom> entry = it.next();
-            PendingRoom pending = entry.getValue();
-            int idx = pending.humans.indexOf(conn);
-            if (idx < 0) continue;
+        synchronized (lobbyLock) {
+            for (Iterator<Map.Entry<String, PendingRoom>> it = waitingRooms.entrySet().iterator(); it.hasNext(); ) {
+                Map.Entry<String, PendingRoom> entry = it.next();
+                PendingRoom pending = entry.getValue();
+                int idx = pending.humans.indexOf(conn);
+                if (idx < 0) continue;
 
-            pending.humans.remove(idx);
-            pending.characters.remove(idx);
-            pending.names.remove(idx);
-            pending.avatarIds.remove(idx);
-            if (pending.humans.isEmpty()) {
-                it.remove();
-            } else {
-                broadcastPendingLobby(pending);
+                pending.humans.remove(idx);
+                pending.characters.remove(idx);
+                pending.names.remove(idx);
+                pending.avatarIds.remove(idx);
+                if (pending.humans.isEmpty()) {
+                    it.remove();
+                } else {
+                    broadcastPendingLobby(pending);
+                }
+                break;
             }
-            break;
         }
 
         // 対局中/終了後ルームから離脱した場合
