@@ -261,11 +261,14 @@ public class GameRoom {
                 seat.name = name == null ? "" : name;
                 seat.avatarId = avatarId;
                 seat.character = CharacterType.NONE;
-                broadcastLobby();
                 return i + 1;
             }
         }
         return -1;
+    }
+
+    public synchronized void broadcastLobbyUpdate() {
+        broadcastLobby();
     }
 
     public boolean getCharacterMode() { return characterMode; }

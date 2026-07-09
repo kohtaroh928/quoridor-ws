@@ -114,6 +114,7 @@ public class WSServer extends WebSocketServer {
                         playerRoomCodes.put(conn, code);
                         conn.send(Protocol.joined(existing.getCharacterMode(), existing.getObstacleMode(),
                                 existing.getPlayerCount(), existing.getTimeLimit()));
+                        existing.broadcastLobbyUpdate();
                         System.out.println("Player joined open seat in room: " + code);
                         return;
                     }
