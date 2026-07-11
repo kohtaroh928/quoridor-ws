@@ -1,10 +1,62 @@
-name: Keep Alive
+name: Keep WebSocket service awake
+
 on:
   schedule:
-    - cron: '*/14 * * * *'
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping server
-        run: curl -s --max-time 60 https://quoridor-ws.onrender.com || true
+      - name: Open a WebSocket connection
+        env:
+          KEEP_ALIVE_WS_URL: ${{ secrets.KEEP_ALIVE_WS_URL }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          import socket
+          import ssl
+          import sys
+          from urllib.parse import urlparse
+
+          url = os.environ.get("KEEP_ALIVE_WS_URL", "").strip()
+          if not url:
+              print("KEEP_ALIVE_WS_URL secret is not set; skipping keep-alive.")
+              sys.exit(0)
+
+          parsed = urlparse(url)
+          if parsed.scheme not in ("ws", "wss") or not parsed.hostname:
+              raise SystemExit("KEEP_ALIVE_WS_URL must start with ws:// or wss://")
+
+          port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+          path = parsed.path or "/"
+          if parsed.query:
+              path += "?" + parsed.query
+
+          key = base64.b64encode(os.urandom(16)).decode("ascii")
+          request = (
+              f"GET {path} HTTP/1.1\r\n"
+              f"Host: {parsed.hostname}\r\n"
+              "Upgrade: websocket\r\n"
+              "Connection: Upgrade\r\n"
+              f"Sec-WebSocket-Key: {key}\r\n"
+              "Sec-WebSocket-Version: 13\r\n"
+              "User-Agent: quoridor-keep-alive\r\n"
+              "\r\n"
+          ).encode("ascii")
+
+          with socket.create_connection((parsed.hostname, port), timeout=30) as raw:
+              conn = raw
+              if parsed.scheme == "wss":
+                  conn = ssl.create_default_context().wrap_socket(raw, server_hostname=parsed.hostname)
+              conn.settimeout(30)
+              conn.sendall(request)
+              response = conn.recv(4096).decode("iso-8859-1", errors="replace")
+
+          if " 101 " not in response.split("\r\n", 1)[0]:
+              raise SystemExit("WebSocket handshake failed: " + response.split("\r\n", 1)[0])
+
+          print("WebSocket keep-alive succeeded.")
+          PY
