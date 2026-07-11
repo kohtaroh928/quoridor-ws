@@ -14,11 +14,12 @@ public class Protocol {
     }
 
     public static String boardUpdate(Board board, int currentPlayer) {
-        return boardUpdate(board, currentPlayer, false, false, 0, 0, null);
+        return boardUpdate(board, currentPlayer, false, false, false, 0, 0, null, 0, true);
     }
 
     public static String boardUpdate(Board board, int currentPlayer, boolean characterMode, boolean obstacleMode,
-                                     int receiverPlayerId, int timeLimit, boolean[] aiSeats) {
+                                     boolean simultaneousMode, int receiverPlayerId, int timeLimit,
+                                     boolean[] aiSeats, int roundNumber, boolean canWait) {
         int n = board.getPlayerCount();
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"BOARD_UPDATE\",\"players\":[");
@@ -73,6 +74,9 @@ public class Protocol {
         sb.append(']');
         sb.append(",\"characterMode\":").append(characterMode);
         sb.append(",\"obstacleMode\":").append(obstacleMode);
+        sb.append(",\"simultaneousMode\":").append(simultaneousMode);
+        sb.append(",\"roundNumber\":").append(roundNumber);
+        sb.append(",\"canWait\":").append(canWait);
         sb.append(",\"characters\":[");
         for (int i = 1; i <= n; i++) {
             if (i > 1) sb.append(',');
@@ -116,7 +120,8 @@ public class Protocol {
     // ロビー(準備待ち)中に、全員のプロフィール・準備状況・ルーム設定を通知する。
     // youは受信者自身の座席番号(1始まり)
     public static String lobbyUpdate(GameRoom.Seat[] seats, boolean[] ready, boolean characterMode,
-                                      boolean obstacleMode, int timeLimit, int players, int you) {
+                                      boolean obstacleMode, boolean simultaneousMode,
+                                      int timeLimit, int players, int you) {
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"LOBBY_UPDATE\",\"you\":").append(you);
         sb.append(",\"seats\":[");
@@ -136,6 +141,7 @@ public class Protocol {
         }
         sb.append("],\"characterMode\":").append(characterMode);
         sb.append(",\"obstacleMode\":").append(obstacleMode);
+        sb.append(",\"simultaneousMode\":").append(simultaneousMode);
         sb.append(",\"timeLimit\":").append(timeLimit);
         sb.append(",\"players\":").append(players);
         sb.append('}');
@@ -143,7 +149,11 @@ public class Protocol {
     }
 
     public static String gameEnd(int winner) {
-        return "{\"type\":\"GAME_END\",\"winner\":" + winner + "}";
+        return gameEnd(winner, false);
+    }
+
+    public static String gameEnd(int winner, boolean draw) {
+        return "{\"type\":\"GAME_END\",\"winner\":" + winner + ",\"draw\":" + draw + "}";
     }
 
     public static String error(String message) {
@@ -159,11 +169,36 @@ public class Protocol {
     }
 
     // ルーム参加成功時に、参加者へルーム設定を伝える
-    public static String joined(boolean characterMode, boolean obstacleMode, int players, int timeLimit) {
+    public static String joined(boolean characterMode, boolean obstacleMode, boolean simultaneousMode,
+                                int players, int timeLimit) {
         return "{\"type\":\"JOINED\",\"characterMode\":" + characterMode
             + ",\"obstacleMode\":" + obstacleMode
+            + ",\"simultaneousMode\":" + simultaneousMode
             + ",\"players\":" + players
             + ",\"timeLimit\":" + timeLimit + "}";
+    }
+
+    public static String actionAccepted(int roundNumber) {
+        return "{\"type\":\"ACTION_ACCEPTED\",\"roundNumber\":" + roundNumber + "}";
+    }
+
+    public static String roundResult(int roundNumber, SimultaneousRound.Action[] actions,
+                                     SimultaneousRound.Outcome outcome) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"type\":\"ROUND_RESULT\",\"roundNumber\":").append(roundNumber);
+        sb.append(",\"actions\":[");
+        for (int i = 0; i < 2; i++) {
+            if (i > 0) sb.append(',');
+            sb.append('"').append(escapeJson(actions[i].label())).append('"');
+        }
+        sb.append("],\"success\":[").append(outcome.success[0]).append(',').append(outcome.success[1]);
+        sb.append("],\"reasons\":[");
+        for (int i = 0; i < 2; i++) {
+            if (i > 0) sb.append(',');
+            sb.append('"').append(escapeJson(outcome.reason[i])).append('"');
+        }
+        sb.append("]}");
+        return sb.toString();
     }
 
     public static String roomFull() {
@@ -204,6 +239,9 @@ public class Protocol {
             int y = ((Number) pos.get("y")).intValue();
             String dir = (String) data.get("direction");
             return ClientMessage.placeWall(x, y, dir);
+        }
+        if ("WAIT".equals(type)) {
+            return ClientMessage.waitAction();
         }
         if ("USE_SKILL".equals(type)) {
             String skill = (String) data.get("skill");
@@ -276,6 +314,10 @@ public class Protocol {
         static ClientMessage placeWall(int x, int y, String dir) {
             Wall.Direction d = Wall.Direction.valueOf(dir);
             return new ClientMessage("PLACE_WALL", null, 0, 0, x, y, d, null);
+        }
+
+        static ClientMessage waitAction() {
+            return new ClientMessage("WAIT", null, 0, 0, 0, 0, null, null);
         }
 
         static ClientMessage skillMove(String skill, int x, int y) {

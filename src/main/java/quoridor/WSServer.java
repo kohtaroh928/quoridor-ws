@@ -66,14 +66,17 @@ public class WSServer extends WebSocketServer {
 
         boolean characterMode = parseBool(data.get("characterMode"));
         boolean obstacleMode = parseBool(data.get("obstacleMode"));
-        int timeLimit = parseTimeLimit(data.get("timeLimit"));
         int playerCount = parsePlayerCount(data.get("players"));
+        boolean simultaneousMode = playerCount == 2 && parseBool(data.get("simultaneousMode"));
+        if (simultaneousMode) characterMode = false;
+        int timeLimit = parseTimeLimit(data.get("timeLimit"));
         int[] slotAi = parseSlotAi(data.get("slotAi"), playerCount);
         CharacterType hostCharacter = parseCharacter((String) data.get("character"), characterMode);
         String hostName = parseName(data.get("playerName"));
         int hostAvatarId = parseAvatarId(data.get("avatarId"));
 
-        PendingRoom pending = new PendingRoom(code, characterMode, obstacleMode, timeLimit, playerCount, slotAi);
+        PendingRoom pending = new PendingRoom(code, characterMode, obstacleMode, simultaneousMode,
+                timeLimit, playerCount, slotAi);
         pending.humans.add(conn);
         pending.characters.add(hostCharacter);
         pending.names.add(hostName);
@@ -108,7 +111,7 @@ public class WSServer extends WebSocketServer {
                     rooms.put(conn, existing);
                     playerRoomCodes.put(conn, code);
                     conn.send(Protocol.joined(existing.getCharacterMode(), existing.getObstacleMode(),
-                            existing.getPlayerCount(), existing.getTimeLimit()));
+                            existing.getSimultaneousMode(), existing.getPlayerCount(), existing.getTimeLimit()));
                     System.out.println("Player joined open seat in room: " + code);
                     return;
                 }
@@ -130,7 +133,7 @@ public class WSServer extends WebSocketServer {
         pending.characters.add(CharacterType.NONE);
         pending.names.add(parseName(data.get("playerName")));
         pending.avatarIds.add(parseAvatarId(data.get("avatarId")));
-        conn.send(Protocol.joined(pending.characterMode, pending.obstacleMode,
+        conn.send(Protocol.joined(pending.characterMode, pending.obstacleMode, pending.simultaneousMode,
                 pending.playerCount, pending.timeLimit));
         System.out.println("Player joined room: " + code
                 + " (" + pending.humans.size() + "/" + pending.humansNeeded + ")");
@@ -162,6 +165,9 @@ public class WSServer extends WebSocketServer {
 
             boolean characterMode = parseBool(data.get("characterMode"));
             boolean obstacleMode = parseBool(data.get("obstacleMode"));
+            boolean simultaneousMode = pending.playerCount == 2 && parseBool(data.get("simultaneousMode"));
+            if (simultaneousMode) characterMode = false;
+            if (characterMode) simultaneousMode = false;
             int timeLimit = parseTimeLimit(data.get("timeLimit"));
 
             if (characterMode != pending.characterMode) {
@@ -169,6 +175,7 @@ public class WSServer extends WebSocketServer {
             }
             pending.characterMode = characterMode;
             pending.obstacleMode = obstacleMode;
+            pending.simultaneousMode = simultaneousMode;
             pending.timeLimit = timeLimit;
 
             broadcastPendingLobby(pending);
@@ -201,7 +208,8 @@ public class WSServer extends WebSocketServer {
             }
         }
 
-        GameRoom gameRoom = new GameRoom(seats, pending.characterMode, pending.obstacleMode, pending.timeLimit);
+        GameRoom gameRoom = new GameRoom(seats, pending.characterMode, pending.obstacleMode,
+                pending.simultaneousMode, pending.timeLimit);
         for (WebSocket s : pending.humans) {
             rooms.put(s, gameRoom);
             playerRoomCodes.put(s, pending.code);
@@ -241,7 +249,7 @@ public class WSServer extends WebSocketServer {
             if (pending.slotAi[i] > 0) continue;
             WebSocket conn = pending.humans.get(humanIdx);
             send(conn, Protocol.lobbyUpdate(seats, null, pending.characterMode, pending.obstacleMode,
-                    pending.timeLimit, pending.playerCount, i + 1));
+                    pending.simultaneousMode, pending.timeLimit, pending.playerCount, i + 1));
             humanIdx++;
         }
     }
@@ -371,6 +379,7 @@ public class WSServer extends WebSocketServer {
         final String code;
         boolean characterMode;
         boolean obstacleMode;
+        boolean simultaneousMode;
         int timeLimit;
         final int playerCount;
         final int[] slotAi;
@@ -380,11 +389,12 @@ public class WSServer extends WebSocketServer {
         final List<String> names = new ArrayList<>();
         final List<Integer> avatarIds = new ArrayList<>();
 
-        PendingRoom(String code, boolean characterMode, boolean obstacleMode,
+        PendingRoom(String code, boolean characterMode, boolean obstacleMode, boolean simultaneousMode,
                     int timeLimit, int playerCount, int[] slotAi) {
             this.code = code;
             this.characterMode = characterMode;
             this.obstacleMode = obstacleMode;
+            this.simultaneousMode = simultaneousMode && playerCount == 2;
             this.timeLimit = timeLimit;
             this.playerCount = playerCount;
             this.slotAi = slotAi;

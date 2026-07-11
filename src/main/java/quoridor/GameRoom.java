@@ -55,6 +55,7 @@ public class GameRoom {
     private final Board board;
     private boolean characterMode;
     private boolean obstacleMode;
+    private boolean simultaneousMode;
     private int timeLimit; // 1ターンの秒数(0=無制限)。ロビー中はホストが変更できる
     private int currentPlayer = 1;
     private boolean gameOver = false;
@@ -67,11 +68,17 @@ public class GameRoom {
     private int turnSerial = 0;
     private int scheduledSerial = -1;
     private ScheduledFuture<?> pendingTask;
+    private final List<ScheduledFuture<?>> simultaneousTasks = new ArrayList<>();
+    private final SimultaneousRound.Action[] roundActions = new SimultaneousRound.Action[2];
+    private final boolean[] waitedLastRound = new boolean[2];
+    private int roundNumber = 1;
 
-    public GameRoom(List<Seat> seatList, boolean characterMode, boolean obstacleMode, int timeLimit) {
+    public GameRoom(List<Seat> seatList, boolean characterMode, boolean obstacleMode,
+                    boolean simultaneousMode, int timeLimit) {
         this.seats = seatList.toArray(new Seat[0]);
         this.board = new Board(this.seats.length);
-        this.characterMode = characterMode;
+        this.simultaneousMode = simultaneousMode && this.seats.length == 2;
+        this.characterMode = characterMode && !this.simultaneousMode;
         this.obstacleMode = obstacleMode;
         this.timeLimit = timeLimit;
         this.rematchRequested = new boolean[this.seats.length];
@@ -107,7 +114,7 @@ public class GameRoom {
             send(seats[i].conn, Protocol.gameStart(i + 1));
         }
         sendBoardUpdate();
-        scheduleTurn();
+        if (simultaneousMode) scheduleSimultaneousRound(); else scheduleTurn();
         System.out.println("Game started! (" + seats.length + " players, "
                 + humanCount() + " humans, timeLimit=" + timeLimit + ")");
     }
@@ -140,7 +147,7 @@ public class GameRoom {
         for (int i = 0; i < seats.length; i++) {
             if (seats[i].conn != null) {
                 send(seats[i].conn, Protocol.lobbyUpdate(seats, readyFlags, characterMode, obstacleMode,
-                        timeLimit, seats.length, i + 1));
+                        simultaneousMode, timeLimit, seats.length, i + 1));
             }
         }
     }
@@ -199,12 +206,15 @@ public class GameRoom {
         broadcastLobby();
     }
 
-    // ホスト(P1)のみ: キャラクター/障害物モード・時間制限を変更する
+    // ホスト(P1)のみ: キャラクター/障害物/同時対戦モード・時間制限を変更する
     private void handleUpdateRoomSettings(int playerId, java.util.Map<String, Object> data) {
         if (started || dissolved || playerId != 1) return;
 
         boolean newCharacterMode = Boolean.TRUE.equals(data.get("characterMode"));
         boolean newObstacleMode = Boolean.TRUE.equals(data.get("obstacleMode"));
+        boolean newSimultaneousMode = seats.length == 2 && Boolean.TRUE.equals(data.get("simultaneousMode"));
+        if (newSimultaneousMode) newCharacterMode = false;
+        if (newCharacterMode) newSimultaneousMode = false;
         Object rawLimit = data.get("timeLimit");
         int newTimeLimit = rawLimit instanceof Number
                 ? Math.max(0, Math.min(600, ((Number) rawLimit).intValue())) : timeLimit;
@@ -215,13 +225,15 @@ public class GameRoom {
             characterMode = newCharacterMode;
             reassignCharacters();
         }
+        simultaneousMode = newSimultaneousMode;
         if (newObstacleMode != obstacleMode) {
             obstacleMode = newObstacleMode;
             board.reset(); // 対局開始前なので、盤面(壁配置)を作り直しても問題ない
             if (obstacleMode) GameLogic.placeObstacleWalls(board, new Random());
         }
         System.out.println("Room settings updated: characterMode=" + characterMode
-                + ", obstacleMode=" + obstacleMode + ", timeLimit=" + timeLimit);
+                + ", obstacleMode=" + obstacleMode + ", simultaneousMode=" + simultaneousMode
+                + ", timeLimit=" + timeLimit);
         broadcastLobby();
     }
 
@@ -270,6 +282,7 @@ public class GameRoom {
 
     public boolean getCharacterMode() { return characterMode; }
     public boolean getObstacleMode() { return obstacleMode; }
+    public boolean getSimultaneousMode() { return simultaneousMode; }
     public int getTimeLimit() { return timeLimit; }
     public int getPlayerCount() { return seats.length; }
 
@@ -320,6 +333,12 @@ public class GameRoom {
                 return;
             }
 
+            if (simultaneousMode) {
+                Protocol.ClientMessage msg = Protocol.parseClientMessage(message);
+                handleSimultaneousAction(playerId, msg);
+                return;
+            }
+
             if (playerId != currentPlayer) {
                 send(conn, Protocol.error("Not your turn"));
                 return;
@@ -346,6 +365,58 @@ public class GameRoom {
         } catch (Exception e) {
             send(conn, Protocol.error("Invalid message: " + e.getMessage()));
         }
+    }
+
+    private void handleSimultaneousAction(int playerId, Protocol.ClientMessage msg) {
+        int index = playerId - 1;
+        if (roundActions[index] != null) {
+            send(getSocket(playerId), Protocol.error("このラウンドの行動は確定済みです"));
+            return;
+        }
+
+        SimultaneousRound.Action action;
+        if ("MOVE".equals(msg.type)) {
+            action = SimultaneousRound.Action.move(msg.toX, msg.toY);
+        } else if ("PLACE_WALL".equals(msg.type)) {
+            action = SimultaneousRound.Action.wall(new Wall(msg.wallX, msg.wallY, msg.wallDirection));
+        } else if ("WAIT".equals(msg.type)) {
+            action = SimultaneousRound.Action.waitAction();
+        } else {
+            send(getSocket(playerId), Protocol.error("同時対戦では通常移動・通常壁・待機のみ選べます"));
+            return;
+        }
+
+        if (!SimultaneousRound.isValidInput(board, playerId, action, !waitedLastRound[index])) {
+            send(getSocket(playerId), Protocol.error("その行動は選択できません"));
+            return;
+        }
+        roundActions[index] = action;
+        send(getSocket(playerId), Protocol.actionAccepted(roundNumber));
+        tryResolveSimultaneousRound();
+    }
+
+    private void tryResolveSimultaneousRound() {
+        if (roundActions[0] == null || roundActions[1] == null || gameOver) return;
+        cancelPendingTask();
+        SimultaneousRound.Action[] resolvedActions = {roundActions[0], roundActions[1]};
+        SimultaneousRound.Outcome outcome = SimultaneousRound.resolve(board, resolvedActions[0], resolvedActions[1]);
+        waitedLastRound[0] = resolvedActions[0].kind == SimultaneousRound.Kind.WAIT;
+        waitedLastRound[1] = resolvedActions[1].kind == SimultaneousRound.Kind.WAIT;
+
+        sendBoardUpdate();
+        broadcast(Protocol.roundResult(roundNumber, resolvedActions, outcome));
+        if (outcome.winner >= 0) {
+            broadcast(Protocol.gameEnd(outcome.winner, outcome.winner == 0));
+            endGame();
+            return;
+        }
+
+        roundActions[0] = null;
+        roundActions[1] = null;
+        roundNumber++;
+        turnSerial++;
+        sendBoardUpdate();
+        scheduleSimultaneousRound();
     }
 
     private void handleMove(int playerId, int toX, int toY) {
@@ -505,9 +576,88 @@ public class GameRoom {
 
     // --- turn timer / AI ---
 
+    private void scheduleSimultaneousRound() {
+        if (!simultaneousMode || gameOver || dissolved) return;
+        cancelPendingTask();
+        final int serial = turnSerial;
+        for (int i = 0; i < 2; i++) {
+            if (!seats[i].ai || roundActions[i] != null) continue;
+            final int playerId = i + 1;
+            simultaneousTasks.add(SCHEDULER.schedule(() -> runSimultaneousAi(serial, playerId),
+                    600, TimeUnit.MILLISECONDS));
+        }
+        if (timeLimit > 0) {
+            pendingTask = SCHEDULER.schedule(() -> onSimultaneousTimeout(serial),
+                    timeLimit, TimeUnit.SECONDS);
+        }
+    }
+
+    private void runSimultaneousAi(int serial, int playerId) {
+        synchronized (this) {
+            if (gameOver || dissolved || serial != turnSerial || roundActions[playerId - 1] != null) return;
+            AIEngine.State state = AIEngine.fromBoard(board, false);
+            AIEngine.Move move = AIEngine.getBestMove(state, playerId, seats[playerId - 1].aiDifficulty);
+            SimultaneousRound.Action action = toSimultaneousAiAction(move);
+            if (action == null || !SimultaneousRound.isValidInput(board, playerId, action,
+                    !waitedLastRound[playerId - 1])) {
+                action = timeoutAction(playerId);
+            }
+            roundActions[playerId - 1] = action;
+            tryResolveSimultaneousRound();
+        }
+    }
+
+    private SimultaneousRound.Action toSimultaneousAiAction(AIEngine.Move move) {
+        if (move == null) return null;
+        if (move.kind == AIEngine.Move.CELL) return SimultaneousRound.Action.move(move.x, move.y);
+        if (move.kind == AIEngine.Move.WALL) {
+            Wall.Direction direction = move.horizontal ? Wall.Direction.HORIZONTAL : Wall.Direction.VERTICAL;
+            return SimultaneousRound.Action.wall(new Wall(move.x, move.y, direction));
+        }
+        return null;
+    }
+
+    private void onSimultaneousTimeout(int serial) {
+        synchronized (this) {
+            if (gameOver || dissolved || serial != turnSerial) return;
+            for (int i = 0; i < 2; i++) {
+                if (roundActions[i] == null) {
+                    roundActions[i] = timeoutAction(i + 1);
+                    send(getSocket(i + 1), Protocol.notice("時間切れのため行動が自動選択されました"));
+                }
+            }
+            tryResolveSimultaneousRound();
+        }
+    }
+
+    private SimultaneousRound.Action timeoutAction(int playerId) {
+        int index = playerId - 1;
+        if (!waitedLastRound[index]) return SimultaneousRound.Action.waitAction();
+
+        List<SimultaneousRound.Action> moves = new ArrayList<>();
+        for (int x = 0; x < Board.SIZE; x++) {
+            for (int y = 0; y < Board.SIZE; y++) {
+                SimultaneousRound.Action action = SimultaneousRound.Action.move(x, y);
+                if (SimultaneousRound.isValidInput(board, playerId, action, false)) moves.add(action);
+            }
+        }
+        if (!moves.isEmpty()) return moves.get(new Random().nextInt(moves.size()));
+
+        for (int x = 0; x < Board.WALL_MAX; x++) {
+            for (int y = 0; y < Board.WALL_MAX; y++) {
+                for (Wall.Direction direction : Wall.Direction.values()) {
+                    SimultaneousRound.Action action = SimultaneousRound.Action.wall(new Wall(x, y, direction));
+                    if (SimultaneousRound.isValidInput(board, playerId, action, false)) return action;
+                }
+            }
+        }
+        return SimultaneousRound.Action.waitAction();
+    }
+
     // 現在の手番に応じて、AIの一手かターンタイムアウトを予約する。
     // 同じターンに対しては一度しか予約しない(トラップ設置は手番が続くため再予約されない)
     private void scheduleTurn() {
+        if (simultaneousMode) return;
         if (gameOver || dissolved) {
             cancelPendingTask();
             return;
@@ -617,6 +767,8 @@ public class GameRoom {
             pendingTask.cancel(false);
             pendingTask = null;
         }
+        for (ScheduledFuture<?> task : simultaneousTasks) task.cancel(false);
+        simultaneousTasks.clear();
     }
 
     // --- disconnect ---
@@ -703,6 +855,11 @@ public class GameRoom {
             GameLogic.placeObstacleWalls(board, new Random());
         }
         currentPlayer = 1;
+        roundActions[0] = null;
+        roundActions[1] = null;
+        waitedLastRound[0] = false;
+        waitedLastRound[1] = false;
+        roundNumber = 1;
         turnSerial++;
         gameOver = false;
         for (int i = 0; i < rematchRequested.length; i++) rematchRequested[i] = false;
@@ -710,7 +867,7 @@ public class GameRoom {
             send(seats[i].conn, Protocol.gameStart(i + 1));
         }
         sendBoardUpdate();
-        scheduleTurn();
+        if (simultaneousMode) scheduleSimultaneousRound(); else scheduleTurn();
         System.out.println("Rematch started!");
     }
 
@@ -770,9 +927,10 @@ public class GameRoom {
     private void sendBoardUpdate() {
         boolean[] aiFlags = new boolean[seats.length];
         for (int i = 0; i < seats.length; i++) aiFlags[i] = seats[i].ai;
+        int visibleCurrentPlayer = simultaneousMode ? 0 : currentPlayer;
         for (int i = 0; i < seats.length; i++) {
-            send(seats[i].conn, Protocol.boardUpdate(board, currentPlayer, characterMode, obstacleMode,
-                    i + 1, timeLimit, aiFlags));
+            send(seats[i].conn, Protocol.boardUpdate(board, visibleCurrentPlayer, characterMode, obstacleMode,
+                    simultaneousMode, i + 1, timeLimit, aiFlags, roundNumber, !waitedLastRound[i]));
         }
     }
 

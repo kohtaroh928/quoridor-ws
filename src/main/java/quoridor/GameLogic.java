@@ -139,6 +139,25 @@ public class GameLogic {
         return true;
     }
 
+    public static boolean canPlaceWallsTogether(Board board, Wall first, Wall second) {
+        board.addWall(first);
+        board.addWall(second);
+        boolean pathsOk = allPlayersHavePath(board);
+        board.removeLastWall();
+        board.removeLastWall();
+        return pathsOk;
+    }
+
+    public static boolean wallsConflict(Wall first, Wall second) {
+        if (first.getDirection() == second.getDirection()) {
+            if (first.getDirection() == Wall.Direction.HORIZONTAL) {
+                return first.getY() == second.getY() && Math.abs(first.getX() - second.getX()) <= 1;
+            }
+            return first.getX() == second.getX() && Math.abs(first.getY() - second.getY()) <= 1;
+        }
+        return first.getX() == second.getX() && first.getY() == second.getY();
+    }
+
     private static boolean wallConflicts(Board board, Wall newWall) {
         for (Wall existing : board.getWalls()) {
             if (existing.getDirection() == newWall.getDirection()) {
