@@ -63,6 +63,7 @@ public class GameRoom {
     private boolean started = false; // trueになるまではロビー(準備待ち)状態
     private final boolean[] readyFlags;
     private final boolean[] rematchRequested;
+    private final boolean[] returnToLobbyRequested;
 
     // ターンごとに増える通し番号。古いタイマー/AIタスクの誤発火を防ぐ
     private int turnSerial = 0;
@@ -82,6 +83,7 @@ public class GameRoom {
         this.obstacleMode = obstacleMode;
         this.timeLimit = timeLimit;
         this.rematchRequested = new boolean[this.seats.length];
+        this.returnToLobbyRequested = new boolean[this.seats.length];
         this.readyFlags = new boolean[this.seats.length];
 
         if (this.characterMode) {
@@ -318,6 +320,10 @@ public class GameRoom {
 
             if ("REMATCH".equals(type)) {
                 handleRematch(playerId);
+                return;
+            }
+            if ("RETURN_TO_LOBBY".equals(type)) {
+                handleReturnToLobby(playerId);
                 return;
             }
 
@@ -872,6 +878,51 @@ public class GameRoom {
         sendBoardUpdate();
         if (simultaneousMode) scheduleSimultaneousRound(); else scheduleTurn();
         System.out.println("Rematch started!");
+    }
+
+    // --- return to lobby ---
+
+    private void handleReturnToLobby(int playerId) {
+        if (!gameOver || dissolved) return;
+        returnToLobbyRequested[playerId - 1] = true;
+
+        boolean allRequested = true;
+        for (int i = 0; i < seats.length; i++) {
+            if (seats[i].ai) continue; // AI席は自動で合意
+            if (seats[i].conn == null || !returnToLobbyRequested[i]) { allRequested = false; break; }
+        }
+
+        if (allRequested) {
+            returnToLobby();
+        } else {
+            for (Seat s : seats) {
+                if (!s.ai && s.conn != null && s.conn != getSocket(playerId)) {
+                    send(s.conn, Protocol.returnToLobbyRequested());
+                }
+            }
+        }
+    }
+
+    private void returnToLobby() {
+        cancelPendingTask();
+        board.reset();
+        if (obstacleMode) {
+            GameLogic.placeObstacleWalls(board, new Random());
+        }
+        currentPlayer = 1;
+        roundActions[0] = null;
+        roundActions[1] = null;
+        waitedLastRound[0] = false;
+        waitedLastRound[1] = false;
+        roundNumber = 1;
+        turnSerial++;
+        gameOver = false;
+        started = false;
+        for (int i = 0; i < rematchRequested.length; i++) rematchRequested[i] = false;
+        for (int i = 0; i < returnToLobbyRequested.length; i++) returnToLobbyRequested[i] = false;
+        for (int i = 0; i < readyFlags.length; i++) readyFlags[i] = false;
+        broadcastLobby();
+        System.out.println("Room returned to lobby.");
     }
 
     // --- helpers ---
