@@ -164,6 +164,10 @@ public class Protocol {
         return "{\"type\":\"REMATCH_REQUESTED\"}";
     }
 
+    public static String returnToLobbyRequested() {
+        return "{\"type\":\"RETURN_TO_LOBBY_REQUESTED\"}";
+    }
+
     public static String roomClosed() {
         return "{\"type\":\"ROOM_CLOSED\"}";
     }
