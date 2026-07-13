@@ -72,8 +72,8 @@ public class GameRoom {
     private int scheduledSerial = -1;
     private ScheduledFuture<?> pendingTask;
     private final List<ScheduledFuture<?>> simultaneousTasks = new ArrayList<>();
-    private final SimultaneousRound.Action[] roundActions = new SimultaneousRound.Action[2];
-    private final boolean[] waitedLastRound = new boolean[2];
+    private final SimultaneousRound.Action[] roundActions;
+    private final boolean[] waitedLastRound;
     private int roundNumber = 1;
 
     public GameRoom(List<Seat> seatList, boolean characterMode, boolean obstacleMode,
@@ -87,6 +87,8 @@ public class GameRoom {
         this.rematchRequested = new boolean[this.seats.length];
         this.returnToLobbyRequested = new boolean[this.seats.length];
         this.readyFlags = new boolean[this.seats.length];
+        this.roundActions = new SimultaneousRound.Action[this.seats.length];
+        this.waitedLastRound = new boolean[this.seats.length];
 
         if (this.characterMode) {
             Random random = new Random();
@@ -884,10 +886,8 @@ public class GameRoom {
             GameLogic.placeObstacleWalls(board, new Random());
         }
         currentPlayer = 1;
-        roundActions[0] = null;
-        roundActions[1] = null;
-        waitedLastRound[0] = false;
-        waitedLastRound[1] = false;
+        for (int i = 0; i < roundActions.length; i++) roundActions[i] = null;
+        for (int i = 0; i < waitedLastRound.length; i++) waitedLastRound[i] = false;
         roundNumber = 1;
         turnSerial++;
         gameOver = false;
@@ -930,10 +930,8 @@ public class GameRoom {
             GameLogic.placeObstacleWalls(board, new Random());
         }
         currentPlayer = 1;
-        roundActions[0] = null;
-        roundActions[1] = null;
-        waitedLastRound[0] = false;
-        waitedLastRound[1] = false;
+        for (int i = 0; i < roundActions.length; i++) roundActions[i] = null;
+        for (int i = 0; i < waitedLastRound.length; i++) waitedLastRound[i] = false;
         roundNumber = 1;
         turnSerial++;
         gameOver = false;
