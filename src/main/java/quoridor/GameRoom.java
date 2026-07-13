@@ -56,6 +56,7 @@ public class GameRoom {
     private boolean characterMode;
     private boolean obstacleMode;
     private boolean simultaneousMode;
+    private boolean publicRoom; // trueなら観戦一覧に表示される(ロビー中にホストが変更できる)
     private int timeLimit; // 1ターンの秒数(0=無制限)。ロビー中はホストが変更できる
     private int currentPlayer = 1;
     private boolean gameOver = false;
@@ -64,6 +65,7 @@ public class GameRoom {
     private final boolean[] readyFlags;
     private final boolean[] rematchRequested;
     private final boolean[] returnToLobbyRequested;
+    private final List<WebSocket> spectators = new ArrayList<>();
 
     // ターンごとに増える通し番号。古いタイマー/AIタスクの誤発火を防ぐ
     private int turnSerial = 0;
@@ -124,7 +126,13 @@ public class GameRoom {
     private void handleReady(int playerId) {
         if (started || dissolved) return;
         Seat seat = seats[playerId - 1];
-        if (seat.ai) return;
+        if (seat.ai && playerId != 1) return;
+        if (seat.ai) {
+            readyFlags[playerId - 1] = true;
+            if (allHumanSeatsReady()) startGame();
+            else broadcastLobby();
+            return;
+        }
         if (characterMode && seat.character == CharacterType.NONE) {
             send(seat.conn, Protocol.error("先にキャラクターを選んでください"));
             return;
@@ -132,13 +140,7 @@ public class GameRoom {
         readyFlags[playerId - 1] = true;
         System.out.println("Player " + playerId + " is ready.");
 
-        boolean allReady = true;
-        for (int i = 0; i < seats.length; i++) {
-            if (seats[i].ai) continue; // AI席は自動で準備完了扱い
-            if (!readyFlags[i]) { allReady = false; break; }
-        }
-
-        if (allReady) {
+        if (allHumanSeatsReady()) {
             startGame();
         } else {
             broadcastLobby();
@@ -149,9 +151,17 @@ public class GameRoom {
         for (int i = 0; i < seats.length; i++) {
             if (seats[i].conn != null) {
                 send(seats[i].conn, Protocol.lobbyUpdate(seats, readyFlags, characterMode, obstacleMode,
-                        simultaneousMode, timeLimit, seats.length, i + 1));
+                        simultaneousMode, timeLimit, seats.length, i + 1, publicRoom));
             }
         }
+    }
+
+    private boolean allHumanSeatsReady() {
+        for (int i = 0; i < seats.length; i++) {
+            if (seats[i].ai) continue; // AI席は自動で準備完了扱い
+            if (seats[i].conn == null || !readyFlags[i]) return false;
+        }
+        return true;
     }
 
     // --- lobby rule / seat configuration (ホストが対局準備ロビーで行う設定変更) ---
@@ -174,16 +184,18 @@ public class GameRoom {
         broadcastLobby();
     }
 
-    // ホスト(P1)のみ: P2以降の席をAI(強さ指定)⇔オンライン参加待ちに切り替える
+    // ホスト(P1)のみ: 各席をAI(強さ指定)⇔オンライン参加待ちに切り替える。
+    // P1は接続を管理用に残したまま、席だけAIとして扱える
     private void handleSetSeatMode(int playerId, java.util.Map<String, Object> data) {
         if (started || dissolved || playerId != 1) return;
         Object rawSeat = data.get("seat");
         if (!(rawSeat instanceof Number)) return;
         int seatIdx = ((Number) rawSeat).intValue() - 1;
-        if (seatIdx <= 0 || seatIdx >= seats.length) return; // ホスト自身の席(0)は対象外
+        if (seatIdx < 0 || seatIdx >= seats.length) return;
+        boolean hostSeat = seatIdx == 0;
 
         Seat seat = seats[seatIdx];
-        if (!seat.ai && seat.conn != null) return; // 既に人間が参加済みの席は変更できない
+        if (!hostSeat && !seat.ai && seat.conn != null) return; // 既に人間が参加済みの席は変更できない
 
         String mode = (String) data.get("mode");
         Random random = new Random();
@@ -192,23 +204,26 @@ public class GameRoom {
                     ? ((Number) data.get("difficulty")).intValue() : 2;
             seat.ai = true;
             seat.aiDifficulty = Math.max(1, Math.min(3, difficulty));
-            seat.conn = null;
+            if (!hostSeat) seat.conn = null;
             if (characterMode) seat.character = AI_CHARACTERS[random.nextInt(AI_CHARACTERS.length)];
         } else if ("OPEN".equals(mode)) {
             seat.ai = false;
-            seat.conn = null;
-            seat.name = "";
-            seat.avatarId = -1;
+            if (!hostSeat) {
+                seat.conn = null;
+                seat.name = "";
+                seat.avatarId = -1;
+            }
             seat.character = CharacterType.NONE;
         } else {
             return;
         }
+        readyFlags[seatIdx] = false;
         board.getPlayer(seatIdx + 1).setCharacter(seat.character);
         System.out.println("Seat " + (seatIdx + 1) + " set to " + mode);
         broadcastLobby();
     }
 
-    // ホスト(P1)のみ: キャラクター/障害物/同時対戦モード・時間制限を変更する
+    // ホスト(P1)のみ: キャラクター/障害物/同時対戦モード・時間制限・公開設定を変更する
     private void handleUpdateRoomSettings(int playerId, java.util.Map<String, Object> data) {
         if (started || dissolved || playerId != 1) return;
 
@@ -217,11 +232,13 @@ public class GameRoom {
         boolean newSimultaneousMode = seats.length == 2 && Boolean.TRUE.equals(data.get("simultaneousMode"));
         if (newSimultaneousMode) newCharacterMode = false;
         if (newCharacterMode) newSimultaneousMode = false;
+        boolean newPublicRoom = Boolean.TRUE.equals(data.get("publicRoom"));
         Object rawLimit = data.get("timeLimit");
         int newTimeLimit = rawLimit instanceof Number
                 ? Math.max(0, Math.min(600, ((Number) rawLimit).intValue())) : timeLimit;
 
         timeLimit = newTimeLimit;
+        publicRoom = newPublicRoom;
 
         if (newCharacterMode != characterMode) {
             characterMode = newCharacterMode;
@@ -795,6 +812,7 @@ public class GameRoom {
             for (Seat s : seats) {
                 if (s.conn != null && s.conn.isOpen()) send(s.conn, Protocol.roomClosed());
             }
+            for (WebSocket sp : spectators) send(sp, Protocol.roomClosed());
             return;
         }
 
@@ -808,6 +826,7 @@ public class GameRoom {
                     send(other.conn, Protocol.error("Opponent disconnected"));
                     send(other.conn, Protocol.gameEnd(playerId == 1 ? 2 : 1));
                 }
+                for (WebSocket sp : spectators) send(sp, Protocol.gameEnd(playerId == 1 ? 2 : 1));
                 return;
             }
 
@@ -833,6 +852,7 @@ public class GameRoom {
         for (Seat s : seats) {
             if (s.conn != null && s.conn.isOpen()) send(s.conn, Protocol.roomClosed());
         }
+        for (WebSocket sp : spectators) send(sp, Protocol.roomClosed());
     }
 
     // --- rematch ---
@@ -922,6 +942,9 @@ public class GameRoom {
         for (int i = 0; i < returnToLobbyRequested.length; i++) returnToLobbyRequested[i] = false;
         for (int i = 0; i < readyFlags.length; i++) readyFlags[i] = false;
         broadcastLobby();
+        // 観戦は対局中のルームのみが対象のため、ロビーに戻ったら観戦者は退出させる
+        for (WebSocket sp : spectators) send(sp, Protocol.roomClosed());
+        spectators.clear();
         System.out.println("Room returned to lobby.");
     }
 
@@ -970,12 +993,14 @@ public class GameRoom {
 
     private void broadcast(String json) {
         for (Seat s : seats) send(s.conn, json);
+        for (WebSocket sp : spectators) send(sp, json);
     }
 
     private void broadcastExcept(WebSocket exclude, String json) {
         for (Seat s : seats) {
             if (s.conn != exclude) send(s.conn, json);
         }
+        for (WebSocket sp : spectators) send(sp, json);
     }
 
     private void sendBoardUpdate() {
@@ -986,6 +1011,12 @@ public class GameRoom {
             send(seats[i].conn, Protocol.boardUpdate(board, visibleCurrentPlayer, characterMode, obstacleMode,
                     simultaneousMode, i + 1, timeLimit, aiFlags, roundNumber, !waitedLastRound[i]));
         }
+        if (!spectators.isEmpty()) {
+            // 観戦者には所有者不明(0)の視点で送り、誰のトラップも見えない中立視点にする
+            String neutral = Protocol.boardUpdate(board, visibleCurrentPlayer, characterMode, obstacleMode,
+                    simultaneousMode, 0, timeLimit, aiFlags, roundNumber, true);
+            for (WebSocket sp : spectators) send(sp, neutral);
+        }
     }
 
     private void send(WebSocket conn, String json) {
@@ -994,5 +1025,32 @@ public class GameRoom {
 
     private WebSocket getSocket(int playerId) {
         return seats[playerId - 1].conn;
+    }
+
+    // --- spectating ---
+
+    public synchronized boolean getPublicRoom() { return publicRoom; }
+
+    public synchronized void setPublicRoom(boolean value) { publicRoom = value; }
+
+    public synchronized boolean isStarted() { return started; }
+
+    public synchronized int getSpectatorCount() { return spectators.size(); }
+
+    public synchronized Seat[] getSeatsSnapshot() { return seats; }
+
+    // 観戦者を追加し、現在の座席状況と盤面(中立視点)を即座に送って途中入室でも追いつけるようにする
+    public synchronized void addSpectator(WebSocket conn) {
+        spectators.add(conn);
+        send(conn, Protocol.spectateJoined(seats, characterMode, obstacleMode, seats.length, timeLimit));
+        boolean[] aiFlags = new boolean[seats.length];
+        for (int i = 0; i < seats.length; i++) aiFlags[i] = seats[i].ai;
+        int visibleCurrentPlayer = simultaneousMode ? 0 : currentPlayer;
+        send(conn, Protocol.boardUpdate(board, visibleCurrentPlayer, characterMode, obstacleMode,
+                simultaneousMode, 0, timeLimit, aiFlags, roundNumber, true));
+    }
+
+    public synchronized void removeSpectator(WebSocket conn) {
+        spectators.remove(conn);
     }
 }

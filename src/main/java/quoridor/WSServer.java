@@ -6,15 +6,14 @@ import org.java_websocket.server.WebSocketServer;
 
 import java.net.InetSocketAddress;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class WSServer extends WebSocketServer {
 
-    private final Object lobbyLock = new Object();
     private final Map<String, PendingRoom> waitingRooms = new HashMap<>();
-    private final Map<String, GameRoom> roomsByCode = new ConcurrentHashMap<>();
-    private final Map<WebSocket, GameRoom> rooms = new ConcurrentHashMap<>();
-    private final Map<WebSocket, String> playerRoomCodes = new ConcurrentHashMap<>();
+    private final Map<String, GameRoom> roomsByCode = new HashMap<>();
+    private final Map<WebSocket, GameRoom> rooms = new HashMap<>();
+    private final Map<WebSocket, String> playerRoomCodes = new HashMap<>();
+    private final Map<WebSocket, GameRoom> spectatorRooms = new HashMap<>();
 
     public WSServer(int port) {
         super(new InetSocketAddress(port));
@@ -26,12 +25,13 @@ public class WSServer extends WebSocketServer {
     }
 
     @Override
-    public void onMessage(WebSocket conn, String message) {
+    public synchronized void onMessage(WebSocket conn, String message) {
         GameRoom room = rooms.get(conn);
         if (room != null) {
             room.onMessage(conn, message);
             return;
         }
+        if (spectatorRooms.containsKey(conn)) return; // 観戦者からの追加メッセージは無視する
 
         try {
             Map<String, Object> data = Protocol.parseJson(message);
@@ -41,6 +41,10 @@ public class WSServer extends WebSocketServer {
                 handleCreateRoom(conn, data);
             } else if ("JOIN".equals(type)) {
                 handleJoin(conn, data);
+            } else if ("SPECTATE_LIST".equals(type)) {
+                handleSpectateList(conn);
+            } else if ("SPECTATE".equals(type)) {
+                handleSpectate(conn, data);
             } else if ("SET_CHARACTER".equals(type)) {
                 handleSetCharacter(conn, data);
             } else if ("UPDATE_ROOM_SETTINGS".equals(type)) {
@@ -54,143 +58,169 @@ public class WSServer extends WebSocketServer {
         }
     }
 
+    // 公開設定かつ対局中のルーム一覧を返す
+    private void handleSpectateList(WebSocket conn) {
+        List<Protocol.RoomSummary> list = new ArrayList<>();
+        for (Map.Entry<String, GameRoom> entry : roomsByCode.entrySet()) {
+            GameRoom room = entry.getValue();
+            if (!room.getPublicRoom() || !room.isStarted() || room.isDissolved()) continue;
+            List<String> names = new ArrayList<>();
+            for (GameRoom.Seat seat : room.getSeatsSnapshot()) {
+                names.add(seat.ai ? "CPU" : (seat.name == null || seat.name.isEmpty() ? "プレイヤー" : seat.name));
+            }
+            list.add(new Protocol.RoomSummary(entry.getKey(), room.getPlayerCount(),
+                    room.getCharacterMode(), room.getObstacleMode(), room.getSpectatorCount(), names));
+        }
+        conn.send(Protocol.roomList(list));
+    }
+
+    // 合言葉を指定して観戦に参加する(公開/非公開に関わらず、対局中のルームなら観戦できる)
+    private void handleSpectate(WebSocket conn, Map<String, Object> data) {
+        String code = normalizeCode((String) data.get("room"));
+        if (code == null) {
+            conn.send(Protocol.error("Room code is required"));
+            return;
+        }
+        GameRoom room = roomsByCode.get(code);
+        if (room == null || !room.isStarted() || room.isDissolved()) {
+            conn.send(Protocol.roomNotFound());
+            return;
+        }
+        room.addSpectator(conn);
+        spectatorRooms.put(conn, room);
+    }
+
     // ホストが設定・スロット構成付きでルームを作成する
     private void handleCreateRoom(WebSocket conn, Map<String, Object> data) {
-        synchronized (lobbyLock) {
-            String code = normalizeCode((String) data.get("room"));
-            if (code == null) {
-                conn.send(Protocol.error("Room code is required"));
-                return;
-            }
-            if (waitingRooms.containsKey(code) || roomsByCode.containsKey(code)) {
-                conn.send(Protocol.roomCodeTaken());
-                return;
-            }
+        String code = normalizeCode((String) data.get("room"));
+        if (code == null) {
+            conn.send(Protocol.error("Room code is required"));
+            return;
+        }
+        if (waitingRooms.containsKey(code) || roomsByCode.containsKey(code)) {
+            conn.send(Protocol.roomCodeTaken());
+            return;
+        }
 
-            boolean characterMode = parseBool(data.get("characterMode"));
-            boolean obstacleMode = parseBool(data.get("obstacleMode"));
-            int playerCount = parsePlayerCount(data.get("players"));
-            boolean simultaneousMode = playerCount == 2 && parseBool(data.get("simultaneousMode"));
-            if (simultaneousMode) characterMode = false;
-            int timeLimit = parseTimeLimit(data.get("timeLimit"));
-            int[] slotAi = parseSlotAi(data.get("slotAi"), playerCount);
-            CharacterType hostCharacter = parseCharacter((String) data.get("character"), characterMode);
-            String hostName = parseName(data.get("playerName"));
-            int hostAvatarId = parseAvatarId(data.get("avatarId"));
+        boolean characterMode = parseBool(data.get("characterMode"));
+        boolean obstacleMode = parseBool(data.get("obstacleMode"));
+        int playerCount = parsePlayerCount(data.get("players"));
+        boolean simultaneousMode = playerCount == 2 && parseBool(data.get("simultaneousMode"));
+        if (simultaneousMode) characterMode = false;
+        int timeLimit = parseTimeLimit(data.get("timeLimit"));
+        int[] slotAi = parseSlotAi(data.get("slotAi"), playerCount);
+        CharacterType hostCharacter = parseCharacter((String) data.get("character"), characterMode);
+        String hostName = parseName(data.get("playerName"));
+        int hostAvatarId = parseAvatarId(data.get("avatarId"));
 
-            PendingRoom pending = new PendingRoom(code, characterMode, obstacleMode, simultaneousMode,
-                    timeLimit, playerCount, slotAi);
-            pending.humans.add(conn);
-            pending.characters.add(hostCharacter);
-            pending.names.add(hostName);
-            pending.avatarIds.add(hostAvatarId);
+        PendingRoom pending = new PendingRoom(code, characterMode, obstacleMode, simultaneousMode,
+                timeLimit, playerCount, slotAi);
+        pending.humans.add(conn);
+        pending.characters.add(hostCharacter);
+        pending.names.add(hostName);
+        pending.avatarIds.add(hostAvatarId);
 
-            System.out.println("Room created: " + code + " (players=" + playerCount
-                    + ", humans=" + pending.humansNeeded + ", timeLimit=" + timeLimit + ")");
+        System.out.println("Room created: " + code + " (players=" + playerCount
+                + ", humans=" + pending.humansNeeded + ", timeLimit=" + timeLimit + ")");
 
-            if (!tryStart(pending)) {
-                waitingRooms.put(code, pending);
-                // ホストは即座にロビー画面へ。他の席は参加者が入るまで空欄で表示される
-                broadcastPendingLobby(pending);
-            }
+        if (!tryStart(pending)) {
+            waitingRooms.put(code, pending);
+            // ホストは即座にロビー画面へ。他の席は参加者が入るまで空欄で表示される
+            broadcastPendingLobby(pending);
         }
     }
 
     // 合言葉でルームに参加する
     private void handleJoin(WebSocket conn, Map<String, Object> data) {
-        synchronized (lobbyLock) {
-            String code = normalizeCode((String) data.get("room"));
-            if (code == null) {
-                conn.send(Protocol.error("Room code is required"));
-                return;
-            }
+        String code = normalizeCode((String) data.get("room"));
+        if (code == null) {
+            conn.send(Protocol.error("Room code is required"));
+            return;
+        }
 
-            PendingRoom pending = waitingRooms.get(code);
-            if (pending == null) {
-                // ホストがロビーで開けたオンライン参加待ちの席があれば、そこに参加できる
-                GameRoom existing = roomsByCode.get(code);
-                if (existing != null && existing.canJoin()) {
-                    int seatId = existing.attachHuman(conn, parseName(data.get("playerName")),
-                            parseAvatarId(data.get("avatarId")));
-                    if (seatId > 0) {
-                        rooms.put(conn, existing);
-                        playerRoomCodes.put(conn, code);
-                        conn.send(Protocol.joined(existing.getCharacterMode(), existing.getObstacleMode(),
-                                existing.getSimultaneousMode(), existing.getPlayerCount(), existing.getTimeLimit()));
-                        existing.broadcastLobbyUpdate();
-                        System.out.println("Player joined open seat in room: " + code);
-                        return;
-                    }
+        PendingRoom pending = waitingRooms.get(code);
+        if (pending == null) {
+            // ホストがロビーで開けたオンライン参加待ちの席があれば、そこに参加できる
+            GameRoom existing = roomsByCode.get(code);
+            if (existing != null && existing.canJoin()) {
+                int seatId = existing.attachHuman(conn, parseName(data.get("playerName")),
+                        parseAvatarId(data.get("avatarId")));
+                if (seatId > 0) {
+                    rooms.put(conn, existing);
+                    playerRoomCodes.put(conn, code);
+                    conn.send(Protocol.joined(existing.getCharacterMode(), existing.getObstacleMode(),
+                            existing.getSimultaneousMode(), existing.getPlayerCount(), existing.getTimeLimit()));
+                    existing.broadcastLobbyUpdate();
+                    System.out.println("Player joined open seat in room: " + code);
+                    return;
                 }
-                // 対局中(=満員)のルームか、存在しないルームか
-                if (roomsByCode.containsKey(code)) {
-                    conn.send(Protocol.roomFull());
-                } else {
-                    conn.send(Protocol.roomNotFound());
-                }
-                return;
             }
-            if (pending.isFull()) {
+            // 対局中(=満員)のルームか、存在しないルームか
+            if (roomsByCode.containsKey(code)) {
                 conn.send(Protocol.roomFull());
-                return;
+            } else {
+                conn.send(Protocol.roomNotFound());
             }
+            return;
+        }
+        if (pending.isFull()) {
+            conn.send(Protocol.roomFull());
+            return;
+        }
 
-            pending.humans.add(conn);
-            pending.characters.add(CharacterType.NONE);
-            pending.names.add(parseName(data.get("playerName")));
-            pending.avatarIds.add(parseAvatarId(data.get("avatarId")));
-            conn.send(Protocol.joined(pending.characterMode, pending.obstacleMode, pending.simultaneousMode,
-                    pending.playerCount, pending.timeLimit));
-            System.out.println("Player joined room: " + code
-                    + " (" + pending.humans.size() + "/" + pending.humansNeeded + ")");
+        pending.humans.add(conn);
+        pending.characters.add(CharacterType.NONE);
+        pending.names.add(parseName(data.get("playerName")));
+        pending.avatarIds.add(parseAvatarId(data.get("avatarId")));
+        conn.send(Protocol.joined(pending.characterMode, pending.obstacleMode, pending.simultaneousMode,
+                pending.playerCount, pending.timeLimit));
+        System.out.println("Player joined room: " + code
+                + " (" + pending.humans.size() + "/" + pending.humansNeeded + ")");
 
-            if (!tryStart(pending)) {
-                // 既存メンバーには空き枠が埋まったことを、この参加者にはキャラクター選択が
-                // 不要な場合に限りロビー画面を即座に届ける
-                broadcastPendingLobby(pending);
-            }
+        if (!tryStart(pending)) {
+            // 既存メンバーには空き枠が埋まったことを、この参加者にはキャラクター選択が
+            // 不要な場合に限りロビー画面を即座に届ける
+            broadcastPendingLobby(pending);
         }
     }
 
     // キャラクターモードのルームで、参加者が自分のキャラクターを選ぶ
     private void handleSetCharacter(WebSocket conn, Map<String, Object> data) {
-        synchronized (lobbyLock) {
-            for (PendingRoom pending : waitingRooms.values()) {
-                int idx = pending.humans.indexOf(conn);
-                if (idx < 0) continue;
+        for (PendingRoom pending : waitingRooms.values()) {
+            int idx = pending.humans.indexOf(conn);
+            if (idx < 0) continue;
 
-                CharacterType character = parseCharacter((String) data.get("character"), pending.characterMode);
-                pending.characters.set(idx, character);
-                if (!tryStart(pending)) broadcastPendingLobby(pending);
-                return;
-            }
+            CharacterType character = parseCharacter((String) data.get("character"), pending.characterMode);
+            pending.characters.set(idx, character);
+            if (!tryStart(pending)) broadcastPendingLobby(pending);
+            return;
         }
     }
 
-    // ホストが対局準備ロビーでキャラクター/障害物モード・時間制限を変更する
+    // ホストが対局準備ロビーでキャラクター/障害物モード・時間制限・公開設定を変更する
     private void handleUpdateRoomSettings(WebSocket conn, Map<String, Object> data) {
-        synchronized (lobbyLock) {
-            for (PendingRoom pending : waitingRooms.values()) {
-                if (pending.humans.isEmpty() || pending.humans.get(0) != conn) continue;
+        for (PendingRoom pending : waitingRooms.values()) {
+            if (pending.humans.isEmpty() || pending.humans.get(0) != conn) continue;
 
-                boolean characterMode = parseBool(data.get("characterMode"));
-                boolean obstacleMode = parseBool(data.get("obstacleMode"));
-                boolean simultaneousMode = pending.playerCount == 2 && parseBool(data.get("simultaneousMode"));
-                if (simultaneousMode) characterMode = false;
-                if (characterMode) simultaneousMode = false;
-                int timeLimit = parseTimeLimit(data.get("timeLimit"));
+            boolean characterMode = parseBool(data.get("characterMode"));
+            boolean obstacleMode = parseBool(data.get("obstacleMode"));
+            boolean simultaneousMode = pending.playerCount == 2 && parseBool(data.get("simultaneousMode"));
+            if (simultaneousMode) characterMode = false;
+            if (characterMode) simultaneousMode = false;
+            boolean publicRoom = parseBool(data.get("publicRoom"));
+            int timeLimit = parseTimeLimit(data.get("timeLimit"));
 
-                if (characterMode != pending.characterMode) {
-                    Collections.fill(pending.characters, CharacterType.NONE);
-                }
-                pending.characterMode = characterMode;
-                pending.obstacleMode = obstacleMode;
-                pending.simultaneousMode = simultaneousMode;
-                pending.timeLimit = timeLimit;
-
-                broadcastPendingLobby(pending);
-                return;
+            if (characterMode != pending.characterMode) {
+                Collections.fill(pending.characters, CharacterType.NONE);
             }
+            pending.characterMode = characterMode;
+            pending.obstacleMode = obstacleMode;
+            pending.simultaneousMode = simultaneousMode;
+            pending.publicRoom = publicRoom;
+            pending.timeLimit = timeLimit;
+
+            broadcastPendingLobby(pending);
+            return;
         }
     }
 
@@ -221,6 +251,7 @@ public class WSServer extends WebSocketServer {
 
         GameRoom gameRoom = new GameRoom(seats, pending.characterMode, pending.obstacleMode,
                 pending.simultaneousMode, pending.timeLimit);
+        gameRoom.setPublicRoom(pending.publicRoom);
         for (WebSocket s : pending.humans) {
             rooms.put(s, gameRoom);
             playerRoomCodes.put(s, pending.code);
@@ -260,34 +291,38 @@ public class WSServer extends WebSocketServer {
             if (pending.slotAi[i] > 0) continue;
             WebSocket conn = pending.humans.get(humanIdx);
             send(conn, Protocol.lobbyUpdate(seats, null, pending.characterMode, pending.obstacleMode,
-                    pending.simultaneousMode, pending.timeLimit, pending.playerCount, i + 1));
+                    pending.simultaneousMode, pending.timeLimit, pending.playerCount, i + 1, pending.publicRoom));
             humanIdx++;
         }
     }
 
     @Override
-    public void onClose(WebSocket conn, int code, String reason, boolean remote) {
+    public synchronized void onClose(WebSocket conn, int code, String reason, boolean remote) {
         System.out.println("Disconnected: " + conn.getRemoteSocketAddress());
 
-        // 待機中ルームから離脱した場合
-        synchronized (lobbyLock) {
-            for (Iterator<Map.Entry<String, PendingRoom>> it = waitingRooms.entrySet().iterator(); it.hasNext(); ) {
-                Map.Entry<String, PendingRoom> entry = it.next();
-                PendingRoom pending = entry.getValue();
-                int idx = pending.humans.indexOf(conn);
-                if (idx < 0) continue;
+        // 観戦者が切断した場合
+        GameRoom specRoom = spectatorRooms.remove(conn);
+        if (specRoom != null) {
+            specRoom.removeSpectator(conn);
+        }
 
-                pending.humans.remove(idx);
-                pending.characters.remove(idx);
-                pending.names.remove(idx);
-                pending.avatarIds.remove(idx);
-                if (pending.humans.isEmpty()) {
-                    it.remove();
-                } else {
-                    broadcastPendingLobby(pending);
-                }
-                break;
+        // 待機中ルームから離脱した場合
+        for (Iterator<Map.Entry<String, PendingRoom>> it = waitingRooms.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<String, PendingRoom> entry = it.next();
+            PendingRoom pending = entry.getValue();
+            int idx = pending.humans.indexOf(conn);
+            if (idx < 0) continue;
+
+            pending.humans.remove(idx);
+            pending.characters.remove(idx);
+            pending.names.remove(idx);
+            pending.avatarIds.remove(idx);
+            if (pending.humans.isEmpty()) {
+                it.remove();
+            } else {
+                broadcastPendingLobby(pending);
             }
+            break;
         }
 
         // 対局中/終了後ルームから離脱した場合
@@ -300,6 +335,9 @@ public class WSServer extends WebSocketServer {
                 for (WebSocket other : room.getHumanSockets()) {
                     rooms.remove(other);
                     playerRoomCodes.remove(other);
+                }
+                for (Iterator<Map.Entry<WebSocket, GameRoom>> it = spectatorRooms.entrySet().iterator(); it.hasNext(); ) {
+                    if (it.next().getValue() == room) it.remove();
                 }
             }
         }
@@ -393,6 +431,7 @@ public class WSServer extends WebSocketServer {
         boolean characterMode;
         boolean obstacleMode;
         boolean simultaneousMode;
+        boolean publicRoom;
         int timeLimit;
         final int playerCount;
         final int[] slotAi;

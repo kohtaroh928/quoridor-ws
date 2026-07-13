@@ -121,7 +121,7 @@ public class Protocol {
     // youは受信者自身の座席番号(1始まり)
     public static String lobbyUpdate(GameRoom.Seat[] seats, boolean[] ready, boolean characterMode,
                                       boolean obstacleMode, boolean simultaneousMode,
-                                      int timeLimit, int players, int you) {
+                                      int timeLimit, int players, int you, boolean publicRoom) {
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"LOBBY_UPDATE\",\"you\":").append(you);
         sb.append(",\"seats\":[");
@@ -144,8 +144,76 @@ public class Protocol {
         sb.append(",\"simultaneousMode\":").append(simultaneousMode);
         sb.append(",\"timeLimit\":").append(timeLimit);
         sb.append(",\"players\":").append(players);
+        sb.append(",\"publicRoom\":").append(publicRoom);
         sb.append('}');
         return sb.toString();
+    }
+
+    // 観戦者がルームに参加した直後に、現在の座席状況(名前・アバター・キャラクター)を伝える
+    public static String spectateJoined(GameRoom.Seat[] seats, boolean characterMode, boolean obstacleMode,
+                                         int players, int timeLimit) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"type\":\"SPECTATE_JOINED\",\"seats\":[");
+        for (int i = 0; i < seats.length; i++) {
+            GameRoom.Seat s = seats[i];
+            if (i > 0) sb.append(',');
+            sb.append("{\"name\":\"").append(escapeJson(s.name == null ? "" : s.name))
+              .append("\",\"avatarId\":").append(s.avatarId)
+              .append(",\"ai\":").append(s.ai)
+              .append(",\"ready\":true")
+              .append(",\"joined\":true")
+              .append(",\"difficulty\":").append(s.aiDifficulty)
+              .append(",\"character\":\"").append(s.character.name()).append('"')
+              .append('}');
+        }
+        sb.append("],\"characterMode\":").append(characterMode);
+        sb.append(",\"obstacleMode\":").append(obstacleMode);
+        sb.append(",\"timeLimit\":").append(timeLimit);
+        sb.append(",\"players\":").append(players);
+        sb.append('}');
+        return sb.toString();
+    }
+
+    // 観戦可能な(公開設定かつ対局中の)ルーム一覧
+    public static String roomList(List<RoomSummary> rooms) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"type\":\"ROOM_LIST\",\"rooms\":[");
+        for (int i = 0; i < rooms.size(); i++) {
+            RoomSummary r = rooms.get(i);
+            if (i > 0) sb.append(',');
+            sb.append("{\"code\":\"").append(r.code).append('"')
+              .append(",\"players\":").append(r.players)
+              .append(",\"characterMode\":").append(r.characterMode)
+              .append(",\"obstacleMode\":").append(r.obstacleMode)
+              .append(",\"spectators\":").append(r.spectators)
+              .append(",\"names\":[");
+            for (int j = 0; j < r.names.size(); j++) {
+                if (j > 0) sb.append(',');
+                sb.append('"').append(escapeJson(r.names.get(j))).append('"');
+            }
+            sb.append("]}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
+    public static class RoomSummary {
+        public final String code;
+        public final int players;
+        public final boolean characterMode;
+        public final boolean obstacleMode;
+        public final int spectators;
+        public final List<String> names;
+
+        public RoomSummary(String code, int players, boolean characterMode, boolean obstacleMode,
+                            int spectators, List<String> names) {
+            this.code = code;
+            this.players = players;
+            this.characterMode = characterMode;
+            this.obstacleMode = obstacleMode;
+            this.spectators = spectators;
+            this.names = names;
+        }
     }
 
     public static String gameEnd(int winner) {
