@@ -17,6 +17,9 @@ public class WSServer extends WebSocketServer {
 
     public WSServer(int port) {
         super(new InetSocketAddress(port));
+        // クライアントが異常終了する等でクローズハンドシェイクが届かない場合でも、
+        // 死んだ接続を早めに検知して座席を参加待ちへ戻せるようにする(デフォルトは60秒)
+        setConnectionLostTimeout(15);
     }
 
     @Override

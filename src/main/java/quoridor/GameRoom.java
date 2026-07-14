@@ -874,6 +874,8 @@ public class GameRoom {
         }
         if (wasHost) reassignHost(index);
         System.out.println("Player " + playerId + " left after game over. Seat is now open.");
+        // この時点ではまだ誰もロビーに戻っていないため実質no-opだが、念のため一貫性を保つ
+        broadcastLobby();
     }
 
     // 抜けた席がホストだった場合、新しいホストを選ぶ。
