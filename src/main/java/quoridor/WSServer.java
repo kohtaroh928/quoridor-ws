@@ -49,9 +49,6 @@ public class WSServer extends WebSocketServer {
                 handleSetCharacter(conn, data);
             } else if ("UPDATE_ROOM_SETTINGS".equals(type)) {
                 handleUpdateRoomSettings(conn, data);
-            } else if ("REMATCH".equals(type)) {
-                // 解散済みルームの生き残りが再戦を押した場合
-                conn.send(Protocol.roomClosed());
             }
         } catch (Exception e) {
             conn.send(Protocol.error("Invalid message: " + e.getMessage()));

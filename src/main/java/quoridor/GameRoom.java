@@ -63,8 +63,12 @@ public class GameRoom {
     private boolean dissolved = false;
     private boolean started = false; // trueになるまではロビー(準備待ち)状態
     private final boolean[] readyFlags;
-    private final boolean[] rematchRequested;
-    private final boolean[] returnToLobbyRequested;
+    // 対局終了後、各プレイヤーが個別に「ロビーに戻る」を押してロビー画面にいるかどうか。
+    // 押していない間は対局終了画面のまま(まだ何も決めていない)状態を表す
+    private final boolean[] inLobby;
+    // 席の設定(AI/参加待ち切り替え、ルーム設定)を操作できる座席番号(0始まり)。
+    // ホストが退出すると、ロビーに戻っている別のプレイヤーへランダムに引き継がれる
+    private int hostIndex = 0;
     private final List<WebSocket> spectators = new ArrayList<>();
 
     // ターンごとに増える通し番号。古いタイマー/AIタスクの誤発火を防ぐ
@@ -84,8 +88,8 @@ public class GameRoom {
         this.characterMode = characterMode && !this.simultaneousMode;
         this.obstacleMode = obstacleMode;
         this.timeLimit = timeLimit;
-        this.rematchRequested = new boolean[this.seats.length];
-        this.returnToLobbyRequested = new boolean[this.seats.length];
+        this.inLobby = new boolean[this.seats.length];
+        java.util.Arrays.fill(this.inLobby, true);
         this.readyFlags = new boolean[this.seats.length];
         this.roundActions = new SimultaneousRound.Action[this.seats.length];
         this.waitedLastRound = new boolean[this.seats.length];
@@ -128,7 +132,7 @@ public class GameRoom {
     private void handleReady(int playerId) {
         if (started || dissolved) return;
         Seat seat = seats[playerId - 1];
-        if (seat.ai && playerId != 1) return;
+        if (seat.ai && playerId - 1 != hostIndex) return;
         if (seat.ai) {
             readyFlags[playerId - 1] = true;
             if (allHumanSeatsReady()) startGame();
@@ -149,11 +153,13 @@ public class GameRoom {
         }
     }
 
+    // ロビーに戻っている(inLobby)接続中の座席にのみ送る。対局終了直後でまだ何も
+    // 選んでいない座席(対局終了画面のまま)には送らず、勝手にロビーへ移動させない
     private void broadcastLobby() {
         for (int i = 0; i < seats.length; i++) {
-            if (seats[i].conn != null) {
+            if (seats[i].conn != null && inLobby[i]) {
                 send(seats[i].conn, Protocol.lobbyUpdate(seats, readyFlags, characterMode, obstacleMode,
-                        simultaneousMode, timeLimit, seats.length, i + 1, publicRoom));
+                        simultaneousMode, timeLimit, seats.length, i + 1, publicRoom, hostIndex + 1));
             }
         }
     }
@@ -186,15 +192,15 @@ public class GameRoom {
         broadcastLobby();
     }
 
-    // ホスト(P1)のみ: 各席をAI(強さ指定)⇔オンライン参加待ちに切り替える。
-    // P1は接続を管理用に残したまま、席だけAIとして扱える
+    // ホストのみ: 各席をAI(強さ指定)⇔オンライン参加待ちに切り替える。
+    // ホストは接続を管理用に残したまま、席だけAIとして扱える
     private void handleSetSeatMode(int playerId, java.util.Map<String, Object> data) {
-        if (started || dissolved || playerId != 1) return;
+        if (started || dissolved || playerId - 1 != hostIndex) return;
         Object rawSeat = data.get("seat");
         if (!(rawSeat instanceof Number)) return;
         int seatIdx = ((Number) rawSeat).intValue() - 1;
         if (seatIdx < 0 || seatIdx >= seats.length) return;
-        boolean hostSeat = seatIdx == 0;
+        boolean hostSeat = seatIdx == hostIndex;
 
         Seat seat = seats[seatIdx];
         if (!hostSeat && !seat.ai && seat.conn != null) return; // 既に人間が参加済みの席は変更できない
@@ -225,9 +231,9 @@ public class GameRoom {
         broadcastLobby();
     }
 
-    // ホスト(P1)のみ: キャラクター/障害物/同時対戦モード・時間制限・公開設定を変更する
+    // ホストのみ: キャラクター/障害物/同時対戦モード・時間制限・公開設定を変更する
     private void handleUpdateRoomSettings(int playerId, java.util.Map<String, Object> data) {
-        if (started || dissolved || playerId != 1) return;
+        if (started || dissolved || playerId - 1 != hostIndex) return;
 
         boolean newCharacterMode = Boolean.TRUE.equals(data.get("characterMode"));
         boolean newObstacleMode = Boolean.TRUE.equals(data.get("obstacleMode"));
@@ -295,6 +301,7 @@ public class GameRoom {
                 seat.name = name == null ? "" : name;
                 seat.avatarId = avatarId;
                 seat.character = CharacterType.NONE;
+                inLobby[i] = true;
                 return i + 1;
             }
         }
@@ -335,17 +342,12 @@ public class GameRoom {
                 handleUpdateRoomSettings(playerId, data);
                 return;
             }
-
-            if (!started) return; // ロビー中は上記のロビー操作メッセージ以外を無視する
-
-            if ("REMATCH".equals(type)) {
-                handleRematch(playerId);
-                return;
-            }
             if ("RETURN_TO_LOBBY".equals(type)) {
                 handleReturnToLobby(playerId);
                 return;
             }
+
+            if (!started) return; // ロビー中は上記のロビー操作メッセージ以外を無視する
 
             if (gameOver) return;
 
@@ -790,6 +792,8 @@ public class GameRoom {
     private void endGame() {
         gameOver = true;
         cancelPendingTask();
+        // 対局終了直後は、全員がまだ「ロビーに戻る/ホームに戻る」を選んでいない状態にする
+        java.util.Arrays.fill(inLobby, false);
     }
 
     private void cancelPendingTask() {
@@ -806,25 +810,36 @@ public class GameRoom {
     public synchronized void onPlayerDisconnected(WebSocket conn) {
         int playerId = seatOf(conn);
         if (playerId <= 0) return;
-        Seat seat = seats[playerId - 1];
+        int index = playerId - 1;
+        Seat seat = seats[index];
+        boolean wasHost = index == hostIndex;
         seat.conn = null;
+        seat.name = "";
+        seat.avatarId = -1;
+        seat.character = CharacterType.NONE;
 
         if (!started) {
-            // ロビー(準備待ち)中の離脱は対局が始まっていないため、そのままルームを解散する
-            dissolved = true;
-            cancelPendingTask();
-            for (Seat s : seats) {
-                if (s.conn != null && s.conn.isOpen()) send(s.conn, Protocol.roomClosed());
+            // ロビー(準備待ち)、または対局後に誰かが既にロビーへ戻っている状態からの離脱。
+            // 誰か一人抜けてもルームは解散せず、その席を参加待ちに戻すだけ
+            readyFlags[index] = false;
+            inLobby[index] = false;
+            if (humanCount() == 0) {
+                dissolved = true;
+                cancelPendingTask();
+                return;
             }
-            for (WebSocket sp : spectators) send(sp, Protocol.roomClosed());
+            if (wasHost) reassignHost(index);
+            System.out.println("Player " + playerId + " left the lobby. Seat is now open.");
+            broadcastLobby();
             return;
         }
 
         if (!gameOver) {
             if (seats.length == 2) {
-                // 2人戦: 従来通り残った側の勝ち
+                // 2人戦: 相手が抜けたので対局は中断し、残った側の勝ちとする。
+                // ルーム自体は解散せず、残った側はそのままロビーに戻ることができる
                 endGame();
-                dissolved = true;
+                if (wasHost) reassignHost(index);
                 Seat other = seats[playerId == 1 ? 1 : 0];
                 if (other.conn != null && other.conn.isOpen()) {
                     send(other.conn, Protocol.error("Opponent disconnected"));
@@ -842,6 +857,7 @@ public class GameRoom {
             }
             seat.ai = true;
             seat.aiDifficulty = 3;
+            if (wasHost) reassignHost(index);
             broadcast(Protocol.notice("P" + playerId + " の通信が切れたため、AI(強)が引き継ぎます"));
             System.out.println("Player " + playerId + " disconnected. AI takes over.");
             sendBoardUpdate();
@@ -850,102 +866,66 @@ public class GameRoom {
             return;
         }
 
-        // ゲーム終了後(再戦待ち中を含む)に相手が退出した場合、待機側に通知して解散する
-        dissolved = true;
-        cancelPendingTask();
-        for (Seat s : seats) {
-            if (s.conn != null && s.conn.isOpen()) send(s.conn, Protocol.roomClosed());
+        // ゲーム終了後、まだ誰もロビーへ戻っていない状態からの離脱: 席を参加待ちにするだけ
+        if (humanCount() == 0) {
+            dissolved = true;
+            cancelPendingTask();
+            return;
         }
-        for (WebSocket sp : spectators) send(sp, Protocol.roomClosed());
+        if (wasHost) reassignHost(index);
+        System.out.println("Player " + playerId + " left after game over. Seat is now open.");
     }
 
-    // --- rematch ---
-
-    private void handleRematch(int playerId) {
-        if (!gameOver || dissolved) return;
-        rematchRequested[playerId - 1] = true;
-
-        boolean allRequested = true;
+    // 抜けた席がホストだった場合、新しいホストを選ぶ。
+    // 優先的にロビーへ戻っている(inLobby)プレイヤーの中からランダムに選び、
+    // 該当者がいなければ接続中の他の人間プレイヤーから選ぶ
+    private void reassignHost(int vacatedIndex) {
+        List<Integer> candidates = new ArrayList<>();
         for (int i = 0; i < seats.length; i++) {
-            if (seats[i].ai) continue; // AI席は自動で合意
-            if (seats[i].conn == null || !rematchRequested[i]) { allRequested = false; break; }
+            if (i == vacatedIndex || seats[i].ai || seats[i].conn == null) continue;
+            if (inLobby[i]) candidates.add(i);
         }
-
-        if (allRequested) {
-            startRematch();
-        } else {
-            for (Seat s : seats) {
-                if (!s.ai && s.conn != null && s.conn != getSocket(playerId)) {
-                    send(s.conn, Protocol.rematchRequested());
-                }
+        if (candidates.isEmpty()) {
+            for (int i = 0; i < seats.length; i++) {
+                if (i == vacatedIndex || seats[i].ai || seats[i].conn == null) continue;
+                candidates.add(i);
             }
         }
-    }
-
-    private void startRematch() {
-        board.reset();
-        if (obstacleMode) {
-            GameLogic.placeObstacleWalls(board, new Random());
-        }
-        currentPlayer = 1;
-        for (int i = 0; i < roundActions.length; i++) roundActions[i] = null;
-        for (int i = 0; i < waitedLastRound.length; i++) waitedLastRound[i] = false;
-        roundNumber = 1;
-        turnSerial++;
-        gameOver = false;
-        for (int i = 0; i < rematchRequested.length; i++) rematchRequested[i] = false;
-        for (int i = 0; i < seats.length; i++) {
-            send(seats[i].conn, Protocol.gameStart(i + 1));
-        }
-        sendBoardUpdate();
-        if (simultaneousMode) scheduleSimultaneousRound(); else scheduleTurn();
-        System.out.println("Rematch started!");
+        if (candidates.isEmpty()) return;
+        hostIndex = candidates.get(new Random().nextInt(candidates.size()));
+        System.out.println("Host left. New host is seat " + (hostIndex + 1));
     }
 
     // --- return to lobby ---
 
+    // ロビーへ戻る/ホームへ戻るは、他のプレイヤーの選択を待たず押した瞬間に個別に反映される。
+    // 最初にロビーへ戻ったプレイヤーが盤面をリセットしてルームをロビー状態に切り替えるが、
+    // まだ何も選んでいない(対局終了画面のままの)プレイヤーには通知しない
     private void handleReturnToLobby(int playerId) {
-        if (!gameOver || dissolved) return;
-        returnToLobbyRequested[playerId - 1] = true;
-
-        boolean allRequested = true;
-        for (int i = 0; i < seats.length; i++) {
-            if (seats[i].ai) continue; // AI席は自動で合意
-            if (seats[i].conn == null || !returnToLobbyRequested[i]) { allRequested = false; break; }
-        }
-
-        if (allRequested) {
-            returnToLobby();
-        } else {
-            for (Seat s : seats) {
-                if (!s.ai && s.conn != null && s.conn != getSocket(playerId)) {
-                    send(s.conn, Protocol.returnToLobbyRequested());
-                }
+        if (dissolved) return;
+        if (started) {
+            if (!gameOver) return; // 対局中は無効
+            cancelPendingTask();
+            board.reset();
+            if (obstacleMode) {
+                GameLogic.placeObstacleWalls(board, new Random());
             }
+            currentPlayer = 1;
+            for (int i = 0; i < roundActions.length; i++) roundActions[i] = null;
+            for (int i = 0; i < waitedLastRound.length; i++) waitedLastRound[i] = false;
+            roundNumber = 1;
+            turnSerial++;
+            gameOver = false;
+            started = false;
+            for (int i = 0; i < readyFlags.length; i++) readyFlags[i] = false;
+            // 観戦は対局中のルームのみが対象のため、ロビーに戻ったら観戦者は退出させる
+            for (WebSocket sp : spectators) send(sp, Protocol.roomClosed());
+            spectators.clear();
+            System.out.println("Room returned to lobby.");
         }
-    }
 
-    private void returnToLobby() {
-        cancelPendingTask();
-        board.reset();
-        if (obstacleMode) {
-            GameLogic.placeObstacleWalls(board, new Random());
-        }
-        currentPlayer = 1;
-        for (int i = 0; i < roundActions.length; i++) roundActions[i] = null;
-        for (int i = 0; i < waitedLastRound.length; i++) waitedLastRound[i] = false;
-        roundNumber = 1;
-        turnSerial++;
-        gameOver = false;
-        started = false;
-        for (int i = 0; i < rematchRequested.length; i++) rematchRequested[i] = false;
-        for (int i = 0; i < returnToLobbyRequested.length; i++) returnToLobbyRequested[i] = false;
-        for (int i = 0; i < readyFlags.length; i++) readyFlags[i] = false;
+        inLobby[playerId - 1] = true;
         broadcastLobby();
-        // 観戦は対局中のルームのみが対象のため、ロビーに戻ったら観戦者は退出させる
-        for (WebSocket sp : spectators) send(sp, Protocol.roomClosed());
-        spectators.clear();
-        System.out.println("Room returned to lobby.");
     }
 
     // --- helpers ---

@@ -122,8 +122,18 @@ public class Protocol {
     public static String lobbyUpdate(GameRoom.Seat[] seats, boolean[] ready, boolean characterMode,
                                       boolean obstacleMode, boolean simultaneousMode,
                                       int timeLimit, int players, int you, boolean publicRoom) {
+        return lobbyUpdate(seats, ready, characterMode, obstacleMode, simultaneousMode,
+                timeLimit, players, you, publicRoom, 1);
+    }
+
+    // host: 席の設定(AI/参加待ち切り替え、ルーム設定)を操作できるホストの座席番号(1始まり)。
+    // ホストが退出すると、ロビーに戻っている別のプレイヤーへ引き継がれることがある
+    public static String lobbyUpdate(GameRoom.Seat[] seats, boolean[] ready, boolean characterMode,
+                                      boolean obstacleMode, boolean simultaneousMode,
+                                      int timeLimit, int players, int you, boolean publicRoom, int host) {
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"LOBBY_UPDATE\",\"you\":").append(you);
+        sb.append(",\"host\":").append(host);
         sb.append(",\"seats\":[");
         for (int i = 0; i < seats.length; i++) {
             GameRoom.Seat s = seats[i];
@@ -226,14 +236,6 @@ public class Protocol {
 
     public static String error(String message) {
         return "{\"type\":\"ERROR\",\"message\":\"" + escapeJson(message) + "\"}";
-    }
-
-    public static String rematchRequested() {
-        return "{\"type\":\"REMATCH_REQUESTED\"}";
-    }
-
-    public static String returnToLobbyRequested() {
-        return "{\"type\":\"RETURN_TO_LOBBY_REQUESTED\"}";
     }
 
     public static String roomClosed() {
