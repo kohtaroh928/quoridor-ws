@@ -346,6 +346,10 @@ public class GameRoom {
                 handleReturnToLobby(playerId);
                 return;
             }
+            if ("LEAVE".equals(type)) {
+                handleLeave(playerId);
+                return;
+            }
 
             if (!started) return; // ロビー中は上記のロビー操作メッセージ以外を無視する
 
@@ -810,6 +814,14 @@ public class GameRoom {
     public synchronized void onPlayerDisconnected(WebSocket conn) {
         int playerId = seatOf(conn);
         if (playerId <= 0) return;
+        handleLeave(playerId);
+    }
+
+    // クライアントが「ホームへ戻る」を押した際に即座に送る明示的な離脱通知。
+    // WebSocketの切断検知(TCP/プロキシ経由だと数秒〜十数秒遅れることがある)を待たずに
+    // 席を参加待ちへ戻せる。この後に実際のソケットクローズでonPlayerDisconnectedが呼ばれても、
+    // その時点で既にseat.connはnullになっているためseatOfが見つからず二重処理にはならない
+    private void handleLeave(int playerId) {
         int index = playerId - 1;
         Seat seat = seats[index];
         boolean wasHost = index == hostIndex;
