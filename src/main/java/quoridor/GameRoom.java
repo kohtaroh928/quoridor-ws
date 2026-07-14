@@ -120,12 +120,14 @@ public class GameRoom {
 
     private synchronized void startGame() {
         started = true;
+        // 最初の手番はランダムに決める。そこから先の順番(currentPlayerを1ずつ進める=時計回り)は変えない
+        currentPlayer = 1 + new Random().nextInt(seats.length);
         for (int i = 0; i < seats.length; i++) {
             send(seats[i].conn, Protocol.gameStart(i + 1));
         }
         sendBoardUpdate();
         if (simultaneousMode) scheduleSimultaneousRound(); else scheduleTurn();
-        System.out.println("Game started! (" + seats.length + " players, "
+        System.out.println("Game started! First player: P" + currentPlayer + " (" + seats.length + " players, "
                 + humanCount() + " humans, timeLimit=" + timeLimit + ")");
     }
 
