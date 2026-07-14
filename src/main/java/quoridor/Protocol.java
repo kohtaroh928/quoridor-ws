@@ -259,13 +259,17 @@ public class Protocol {
         StringBuilder sb = new StringBuilder();
         sb.append("{\"type\":\"ROUND_RESULT\",\"roundNumber\":").append(roundNumber);
         sb.append(",\"actions\":[");
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < actions.length; i++) {
             if (i > 0) sb.append(',');
             sb.append('"').append(escapeJson(actions[i].label())).append('"');
         }
-        sb.append("],\"success\":[").append(outcome.success[0]).append(',').append(outcome.success[1]);
+        sb.append("],\"success\":[");
+        for (int i = 0; i < outcome.success.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(outcome.success[i]);
+        }
         sb.append("],\"reasons\":[");
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < outcome.reason.length; i++) {
             if (i > 0) sb.append(',');
             sb.append('"').append(escapeJson(outcome.reason[i])).append('"');
         }

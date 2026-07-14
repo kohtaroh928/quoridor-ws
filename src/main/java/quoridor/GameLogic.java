@@ -140,11 +140,14 @@ public class GameLogic {
     }
 
     public static boolean canPlaceWallsTogether(Board board, Wall first, Wall second) {
-        board.addWall(first);
-        board.addWall(second);
+        return canPlaceWallsTogether(board, java.util.Arrays.asList(first, second));
+    }
+
+    // N人同時対戦用: 複数の新規壁をまとめて仮設置しても全員の経路が残るか判定する
+    public static boolean canPlaceWallsTogether(Board board, List<Wall> walls) {
+        for (Wall wall : walls) board.addWall(wall);
         boolean pathsOk = allPlayersHavePath(board);
-        board.removeLastWall();
-        board.removeLastWall();
+        for (int i = 0; i < walls.size(); i++) board.removeLastWall();
         return pathsOk;
     }
 

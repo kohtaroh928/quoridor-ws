@@ -105,7 +105,8 @@ public class WSServer extends WebSocketServer {
         boolean characterMode = parseBool(data.get("characterMode"));
         boolean obstacleMode = parseBool(data.get("obstacleMode"));
         int playerCount = parsePlayerCount(data.get("players"));
-        boolean simultaneousMode = playerCount == 2 && parseBool(data.get("simultaneousMode"));
+        boolean simultaneousMode = (playerCount == 2 || playerCount == 4)
+                && parseBool(data.get("simultaneousMode"));
         if (simultaneousMode) characterMode = false;
         int timeLimit = parseTimeLimit(data.get("timeLimit"));
         int[] slotAi = parseSlotAi(data.get("slotAi"), playerCount);
@@ -204,7 +205,8 @@ public class WSServer extends WebSocketServer {
 
             boolean characterMode = parseBool(data.get("characterMode"));
             boolean obstacleMode = parseBool(data.get("obstacleMode"));
-            boolean simultaneousMode = pending.playerCount == 2 && parseBool(data.get("simultaneousMode"));
+            boolean simultaneousMode = (pending.playerCount == 2 || pending.playerCount == 4)
+                    && parseBool(data.get("simultaneousMode"));
             if (simultaneousMode) characterMode = false;
             if (characterMode) simultaneousMode = false;
             boolean publicRoom = parseBool(data.get("publicRoom"));
@@ -446,7 +448,7 @@ public class WSServer extends WebSocketServer {
             this.code = code;
             this.characterMode = characterMode;
             this.obstacleMode = obstacleMode;
-            this.simultaneousMode = simultaneousMode && playerCount == 2;
+            this.simultaneousMode = simultaneousMode && (playerCount == 2 || playerCount == 4);
             this.timeLimit = timeLimit;
             this.playerCount = playerCount;
             this.slotAi = slotAi;

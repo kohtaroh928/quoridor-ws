@@ -80,7 +80,7 @@ public class GameRoom {
                     boolean simultaneousMode, int timeLimit) {
         this.seats = seatList.toArray(new Seat[0]);
         this.board = new Board(this.seats.length);
-        this.simultaneousMode = simultaneousMode && this.seats.length == 2;
+        this.simultaneousMode = simultaneousMode && (this.seats.length == 2 || this.seats.length == 4);
         this.characterMode = characterMode && !this.simultaneousMode;
         this.obstacleMode = obstacleMode;
         this.timeLimit = timeLimit;
@@ -231,7 +231,8 @@ public class GameRoom {
 
         boolean newCharacterMode = Boolean.TRUE.equals(data.get("characterMode"));
         boolean newObstacleMode = Boolean.TRUE.equals(data.get("obstacleMode"));
-        boolean newSimultaneousMode = seats.length == 2 && Boolean.TRUE.equals(data.get("simultaneousMode"));
+        boolean newSimultaneousMode = (seats.length == 2 || seats.length == 4)
+                && Boolean.TRUE.equals(data.get("simultaneousMode"));
         if (newSimultaneousMode) newCharacterMode = false;
         if (newCharacterMode) newSimultaneousMode = false;
         boolean newPublicRoom = Boolean.TRUE.equals(data.get("publicRoom"));
@@ -424,12 +425,14 @@ public class GameRoom {
     }
 
     private void tryResolveSimultaneousRound() {
-        if (roundActions[0] == null || roundActions[1] == null || gameOver) return;
+        for (SimultaneousRound.Action a : roundActions) if (a == null) return;
+        if (gameOver) return;
         cancelPendingTask();
-        SimultaneousRound.Action[] resolvedActions = {roundActions[0], roundActions[1]};
-        SimultaneousRound.Outcome outcome = SimultaneousRound.resolve(board, resolvedActions[0], resolvedActions[1]);
-        waitedLastRound[0] = resolvedActions[0].kind == SimultaneousRound.Kind.WAIT;
-        waitedLastRound[1] = resolvedActions[1].kind == SimultaneousRound.Kind.WAIT;
+        SimultaneousRound.Action[] resolvedActions = roundActions.clone();
+        SimultaneousRound.Outcome outcome = SimultaneousRound.resolve(board, resolvedActions);
+        for (int i = 0; i < resolvedActions.length; i++) {
+            waitedLastRound[i] = resolvedActions[i].kind == SimultaneousRound.Kind.WAIT;
+        }
 
         sendBoardUpdate();
         broadcast(Protocol.roundResult(roundNumber, resolvedActions, outcome));
@@ -439,8 +442,7 @@ public class GameRoom {
             return;
         }
 
-        roundActions[0] = null;
-        roundActions[1] = null;
+        java.util.Arrays.fill(roundActions, null);
         roundNumber++;
         turnSerial++;
         sendBoardUpdate();
@@ -608,7 +610,7 @@ public class GameRoom {
         if (!simultaneousMode || gameOver || dissolved) return;
         cancelPendingTask();
         final int serial = turnSerial;
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < seats.length; i++) {
             if (!seats[i].ai || roundActions[i] != null) continue;
             final int playerId = i + 1;
             simultaneousTasks.add(SCHEDULER.schedule(() -> runSimultaneousAi(serial, playerId),
@@ -648,7 +650,7 @@ public class GameRoom {
     private void onSimultaneousTimeout(int serial) {
         synchronized (this) {
             if (gameOver || dissolved || serial != turnSerial) return;
-            for (int i = 0; i < 2; i++) {
+            for (int i = 0; i < seats.length; i++) {
                 if (roundActions[i] == null) {
                     roundActions[i] = timeoutAction(i + 1);
                     send(getSocket(i + 1), Protocol.notice("時間切れのため行動が自動選択されました"));
